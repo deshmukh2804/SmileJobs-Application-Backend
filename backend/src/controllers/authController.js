@@ -3,8 +3,30 @@ const { OAuth2Client } = require('google-auth-library');
 const User = require('../models/User');
 const { generateOTP, verifyOTP, getDebugOTP } = require('../services/otpService');
 
-// Initialize Google OAuth2Client with Web Client ID from environment variables
-const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+// Web Client ID fallback to prevent audience mismatch errors
+const GOOGLE_CLIENT_ID =
+  process.env.GOOGLE_CLIENT_ID ||
+  '220136080079-jgj4u2up1ntj3ovg29f806rg3sl7c9vf.apps.googleusercontent.com';
+
+const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
+
+// ── Centralized Safe JWT Signer ──
+const generateAuthToken = (user) => {
+  const secret = process.env.JWT_SECRET || 'careerflow_production_jwt_secret_key_default';
+  // Handles JWT_EXPIRES_IN, JWT_EXPIRE or safely defaults to '30d'
+  const expiresIn = process.env.JWT_EXPIRES_IN || process.env.JWT_EXPIRE || '30d';
+
+  return jwt.sign(
+    {
+      id: user._id,
+      phoneNumber: user.phoneNumber || '',
+      email: user.email || '',
+      role: user.role || 'job_seeker',
+    },
+    secret,
+    { expiresIn }
+  );
+};
 
 // ─────────────────────────────────
 // 📱 POST /api/auth/send-otp
@@ -25,13 +47,14 @@ exports.sendOTP = async (req, res) => {
 
     const debugOtp = getDebugOTP(phoneNumber);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: 'OTP sent successfully',
       ...(debugOtp && { debugOtp }),
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    console.error('❌ Error sending OTP:', error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
 
@@ -58,7 +81,12 @@ exports.verifyOTP = async (req, res) => {
     let isNewUser = false;
 
     if (!user) {
-      user = await User.create({ phoneNumber, isVerified: true, authProvider: 'phone' });
+      user = await User.create({
+        phoneNumber,
+        isVerified: true,
+        authProvider: 'phone',
+        role: 'job_seeker',
+      });
       isNewUser = true;
     } else {
       user.isVerified = true;
@@ -66,13 +94,10 @@ exports.verifyOTP = async (req, res) => {
       await user.save();
     }
 
-    const token = jwt.sign(
-      { id: user._id, phoneNumber: user.phoneNumber, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE }
-    );
+    // Generate JWT token safely
+    const token = generateAuthToken(user);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: isNewUser ? 'Account created!' : 'Welcome back!',
       isNewUser,
@@ -80,12 +105,13 @@ exports.verifyOTP = async (req, res) => {
       user: {
         id: user._id,
         phoneNumber: user.phoneNumber,
-        name: user.name,
+        name: user.name || '',
         role: user.role,
       },
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    console.error('❌ Error verifying OTP:', error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
 
@@ -103,10 +129,10 @@ exports.googleLogin = async (req, res) => {
       });
     }
 
-    // Verify the Token with Google OAuth
+    // Verify token with Google OAuth
     const ticket = await googleClient.verifyIdToken({
       idToken,
-      audience: process.env.GOOGLE_CLIENT_ID, // Audience matches your backend's Web Client ID configuration
+      audience: GOOGLE_CLIENT_ID,
     });
 
     const payload = ticket.getPayload();
@@ -125,13 +151,12 @@ exports.googleLogin = async (req, res) => {
     let user = await User.findOne({ googleId });
     let isNewUser = false;
 
-    // Fallback search to handle email updates
+    // Fallback lookup by email
     if (!user && email) {
       user = await User.findOne({ email });
     }
 
     if (user) {
-      // Update account provider links on dynamic logins
       if (!user.googleId) {
         user.googleId = googleId;
         user.authProvider = user.phoneNumber ? 'both' : 'google';
@@ -150,18 +175,16 @@ exports.googleLogin = async (req, res) => {
         avatarUrl: picture,
         authProvider: 'google',
         isVerified: true,
+        role: 'job_seeker',
         lastLogin: new Date(),
       });
       isNewUser = true;
     }
 
-    const token = jwt.sign(
-      { id: user._id, phoneNumber: user.phoneNumber || '', role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE }
-    );
+    // Generate token safely
+    const token = generateAuthToken(user);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: isNewUser ? 'Account created with Google!' : 'Welcome back!',
       isNewUser,
@@ -177,24 +200,30 @@ exports.googleLogin = async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Google verification API error:', error.message);
-    res.status(401).json({
+    return res.status(401).json({
       success: false,
-      message: 'Invalid Google ID token signature',
+      message: error.message || 'Invalid Google ID token signature',
     });
   }
 };
 
 // ─────────────────────────────────
-// 👤 GET /api/auth/profile
+// 👤 GET /api/auth/profile/me
 // ─────────────────────────────────
 exports.getProfile = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select('-__v');
+    const userId = req.user?.id || req.user?._id;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Not authorized' });
+    }
+
+    const user = await User.findById(userId).select('-__v');
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
-    res.status(200).json({ success: true, data: user });
+    return res.status(200).json({ success: true, user });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    console.error('❌ Error getting profile:', error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
