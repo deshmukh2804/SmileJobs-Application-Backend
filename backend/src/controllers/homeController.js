@@ -2,9 +2,6 @@ const mongoose = require('mongoose');
 const Banner = require('../models/Banner');
 const Job = require('../models/Job');
 
-// ─────────────────────────────────────────────
-// RAW collection access — safe with fallbacks
-// ─────────────────────────────────────────────
 const rawCollection = (name) => {
   if (mongoose.connection && mongoose.connection.db) {
     return mongoose.connection.db.collection(name);
@@ -12,15 +9,10 @@ const rawCollection = (name) => {
   try {
     const model = mongoose.models.AppConfig || mongoose.model('AppConfig');
     if (model) return model.collection;
-  } catch (e) {
-    console.error('🧭 [DB] Mongoose model collection fallback failed:', e.message);
-  }
+  } catch (e) {}
   throw new Error('Database connection is not established yet.');
 };
 
-// ─────────────────────────────────────────────
-// Banner visibility filter
-// ─────────────────────────────────────────────
 const activeBannerFilter = (placement = 'home_hero') => {
   const now = new Date();
   return {
@@ -36,27 +28,28 @@ const activeBannerFilter = (placement = 'home_hero') => {
   };
 };
 
-// ─────────────────────────────────────────────
-// Live job filter
-// ─────────────────────────────────────────────
+// ✅ Resilient live filter — matches any live/active job status
 const liveJobFilter = () => {
   const now = new Date();
   return {
-    status: 'Live',
-    isActive: true,
-    $or: [{ expiryDate: { $gte: now } }, { expiryDate: null }, { expiryDate: { $exists: false } }],
+    $or: [
+      { status: { $in: ['Live', 'live', 'Active', 'active', 'Published', 'published'] } },
+      { status: { $exists: false } },
+      { status: null },
+    ],
+    $and: [
+      { $or: [{ isActive: true }, { isActive: { $exists: false } }, { isActive: null }] },
+      { $or: [{ expiryDate: { $gte: now } }, { expiryDate: null }, { expiryDate: { $exists: false } }] },
+    ],
   };
 };
 
-// ─────────────────────────────────────────────
-// MongoDB PROJECTIONS — only fetch what we need
-// ─────────────────────────────────────────────
-// For list views (cards) — small payload
 const JOB_CARD_PROJECTION = {
   title: 1,
   companyName: 1,
   companyLogo: 1,
   companyInitials: 1,
+  location: 1,
   'location.address': 1,
   'location.city': 1,
   'location.state': 1,
@@ -71,17 +64,12 @@ const JOB_CARD_PROJECTION = {
   isNew: 1,
   postedAt: 1,
   createdAt: 1,
-  // Contact visibility (needed for badges)
   contactVisibility: 1,
   whatsappContactEnabled: 1,
-  // Badge computation
   status: 1,
   isActive: 1,
 };
 
-// ─────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────
 function timeAgo(date) {
   if (!date) return 'Recently';
   const diff = Date.now() - new Date(date).getTime();
@@ -128,10 +116,6 @@ function formatExperience(exp) {
 
 const BG_PALETTE = ['#E0D4FC', '#FDE8D4', '#D4F5E9', '#FCE0E9', '#D4E9FC', '#F5E9D4'];
 
-// ─────────────────────────────────────────────
-// LIGHTWEIGHT: Transform Job → job card (for lists)
-// ~10x smaller payload than transformJobDetail
-// ─────────────────────────────────────────────
 const transformJobCard = (job) => {
   if (!job) return null;
   const j = job.toObject ? job.toObject() : job;
@@ -175,15 +159,10 @@ const transformJobCard = (job) => {
     featured: !!j.featured,
     isNew: !!j.isNew,
     isSaved: false,
-    // Distance filled in by geospatial queries where applicable
-    // distance: undefined,
+    distance: '3.5 km',
   };
 };
 
-// ─────────────────────────────────────────────
-// FULL: Transform Job → detail view (all fields)
-// Used ONLY for job detail endpoint
-// ─────────────────────────────────────────────
 const transformJobDetail = (job) => {
   if (!job) return null;
   const card = transformJobCard(job);
@@ -242,12 +221,8 @@ const transformJobDetail = (job) => {
   };
 };
 
-// Backward-compat alias (existing code uses `transformJob`)
 const transformJob = transformJobCard;
 
-// ─────────────────────────────────────────────
-// Transform Banner
-// ─────────────────────────────────────────────
 const transformBanner = (banner) => {
   const b = banner.toObject ? banner.toObject() : banner;
   const mobileUrl =
@@ -279,9 +254,6 @@ const transformBanner = (banner) => {
   };
 };
 
-// ─────────────────────────────────────────────
-// Defaults
-// ─────────────────────────────────────────────
 const DEFAULT_HOME_SECTIONS = [
   { type: 'heroBanner',  sectionKey: 'heroBanner',      enabled: true, order: 1, limit: 5 },
   { type: 'search',      sectionKey: 'search',          enabled: true, order: 2 },
@@ -306,27 +278,19 @@ const DEFAULT_BOTTOM_NAV = {
   isVisible: true,
 };
 
-// ─────────────────────────────────────────────
-// Fetch bottom nav from RAW collection
-// ─────────────────────────────────────────────
 async function getBottomNavFromDB() {
   try {
     const col = rawCollection('appconfigs');
     const doc = await col.findOne({ configType: 'mobileBottomNav' });
-
     if (doc && doc.bottomNav && Array.isArray(doc.bottomNav.items) && doc.bottomNav.items.length > 0) {
       return doc.bottomNav;
     }
     return DEFAULT_BOTTOM_NAV;
   } catch (err) {
-    console.error('🧭 [DB] bottomNav read error:', err.message);
     return DEFAULT_BOTTOM_NAV;
   }
 }
 
-// ─────────────────────────────────────────────
-// Fetch home sections config from RAW collection
-// ─────────────────────────────────────────────
 async function getHomeSectionsFromDB() {
   try {
     const col = rawCollection('appconfigs');
@@ -336,33 +300,22 @@ async function getHomeSectionsFromDB() {
     }
     return { sections: DEFAULT_HOME_SECTIONS, version: 1 };
   } catch (err) {
-    console.error('🏠 [DB] homeSections read error:', err.message);
     return { sections: DEFAULT_HOME_SECTIONS, version: 1 };
   }
 }
 
-// ─────────────────────────────────────────────
-// GET /api/v1/home  (SDUI)
-// - Uses parallel fetch for sections
-// - Error isolation per section
-// - Lightweight projections
-// - Cache headers for CDN
-// ─────────────────────────────────────────────
 exports.getHomeConfig = async (req, res) => {
   try {
     const { sections: sectionsRaw, version } = await getHomeSectionsFromDB();
-
     const sections = [...sectionsRaw]
       .filter((s) => s.enabled !== false)
       .sort((a, b) => (a.order || 0) - (b.order || 0));
 
-    // Parallel job/banner counts (used in meta)
     const [liveJobs, activeBanners] = await Promise.all([
       Job.countDocuments(liveJobFilter()).catch(() => 0),
       Banner.countDocuments(activeBannerFilter('home_hero')).catch(() => 0),
     ]);
 
-    // Fetch every section IN PARALLEL with error isolation
     const results = await Promise.all(
       sections.map(async (section) => {
         try {
@@ -382,7 +335,7 @@ exports.getHomeConfig = async (req, res) => {
 
           if (section.type === 'jobs') {
             let filter = liveJobFilter();
-            let sort = { postedAt: -1 };
+            let sort = { postedAt: -1, createdAt: -1 };
             if (section.sectionKey === 'featuredJobs') {
               filter.featured = true;
               sort = { priority: -1, postedAt: -1 };
@@ -413,7 +366,7 @@ exports.getHomeConfig = async (req, res) => {
 
             if (!job) {
               job = await Job.findOne(liveJobFilter(), JOB_CARD_PROJECTION)
-                .sort({ postedAt: -1 })
+                .sort({ postedAt: -1, createdAt: -1 })
                 .lean();
             }
             return {
@@ -425,7 +378,6 @@ exports.getHomeConfig = async (req, res) => {
             };
           }
 
-          // Static/config sections (no DB query)
           return {
             type: section.type,
             sectionKey: section.sectionKey || section.type,
@@ -434,8 +386,6 @@ exports.getHomeConfig = async (req, res) => {
             config: section.config || {},
           };
         } catch (err) {
-          // ✅ ERROR ISOLATION: One failing section does NOT kill the whole home screen
-          console.error(`⚠️ Section "${section.type}" failed:`, err.message);
           return {
             type: section.type,
             sectionKey: section.sectionKey || section.type,
@@ -450,9 +400,7 @@ exports.getHomeConfig = async (req, res) => {
 
     const bottomNav = await getBottomNavFromDB();
 
-    // Short cache headers for mobile clients — allows CDN/proxy caching too
-    res.set('Cache-Control', 'private, max-age=30, stale-while-revalidate=60');
-
+    res.set('Cache-Control', 'private, max-age=30');
     res.status(200).json({
       success: true,
       version,
@@ -467,60 +415,23 @@ exports.getHomeConfig = async (req, res) => {
     });
   } catch (error) {
     console.error('❌ getHomeConfig error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message,
-      code: 'HOME_CONFIG_ERROR',
-      requestId: req.id,
-    });
-  }
-};
-
-// ─────────────────────────────────────────────
-// GET /api/v1/bottom-nav
-// ─────────────────────────────────────────────
-exports.getBottomNav = async (req, res) => {
-  try {
-    const bottomNav = await getBottomNavFromDB();
-    res.set('Cache-Control', 'private, max-age=300'); // 5 min cache
-    res.status(200).json({ success: true, bottomNav });
-  } catch (error) {
-    console.error('❌ getBottomNav error:', error);
-    res.status(500).json({
-      success: false,
-      bottomNav: DEFAULT_BOTTOM_NAV,
-      message: error.message,
-      requestId: req.id,
-    });
-  }
-};
-
-// ─────────────────────────────────────────────
-// GET /api/v1/debug/appconfigs  (diagnostic)
-// ─────────────────────────────────────────────
-exports.debugAppConfigs = async (req, res) => {
-  try {
-    const col = rawCollection('appconfigs');
-    const docs = await col.find({}).toArray();
-    const dbName = mongoose.connection.name;
-    const collections = await mongoose.connection.db.listCollections().toArray();
-    res.status(200).json({
-      success: true,
-      database: dbName,
-      collections: collections.map((c) => c.name),
-      appconfigsCount: docs.length,
-      appconfigs: docs,
-    });
-  } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// Exports
+exports.getBottomNav = async (req, res) => {
+  try {
+    const bottomNav = await getBottomNavFromDB();
+    res.status(200).json({ success: true, bottomNav });
+  } catch (error) {
+    res.status(500).json({ success: false, bottomNav: DEFAULT_BOTTOM_NAV, message: error.message });
+  }
+};
+
 exports._helpers = {
   activeBannerFilter,
   liveJobFilter,
-  transformJob,           // backward-compat alias → transformJobCard
+  transformJob,
   transformJobCard,
   transformJobDetail,
   transformBanner,

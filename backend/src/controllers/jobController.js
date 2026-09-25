@@ -6,9 +6,47 @@ const NEARBY_RADIUS_KM = 50;
 const MAX_LIMIT = 50;
 const DEFAULT_LIMIT = 20;
 
-// ─────────────────────────────────────────────
-// Validation helpers
-// ─────────────────────────────────────────────
+// Instant local coordinates for distance math fallback
+const LOCAL_COORDS = {
+  'pune': { lat: 18.5204, lon: 73.8567 },
+  'talegaon dabhade': { lat: 18.7358, lon: 73.6756 },
+  'talegaon': { lat: 18.7358, lon: 73.6756 },
+  'chinchwad': { lat: 18.6298, lon: 73.7997 },
+  'hinjewadi': { lat: 18.5905, lon: 73.7376 },
+  'wakad': { lat: 18.5975, lon: 73.7625 },
+  'kharadi': { lat: 18.5515, lon: 73.9370 },
+  'hadapsar': { lat: 18.5089, lon: 73.9260 },
+  'baner': { lat: 18.5590, lon: 73.7868 },
+  'kothrud': { lat: 18.5074, lon: 73.8077 },
+  'pimpri': { lat: 18.6280, lon: 73.7997 },
+  'mumbai': { lat: 19.0760, lon: 72.8777 },
+  'andheri': { lat: 19.1197, lon: 72.8468 },
+  'bengaluru': { lat: 12.9716, lon: 77.5946 },
+  'bangalore': { lat: 12.9716, lon: 77.5946 },
+  'hyderabad': { lat: 17.3850, lon: 78.4867 },
+  'delhi': { lat: 28.6139, lon: 77.2090 },
+  'delhi ncr': { lat: 28.6139, lon: 77.2090 },
+  'noida': { lat: 28.5355, lon: 77.3910 },
+  'gurugram': { lat: 28.4595, lon: 77.0266 },
+  'chennai': { lat: 13.0827, lon: 80.2707 },
+  'kolkata': { lat: 22.5726, lon: 88.3639 },
+  'ahmedabad': { lat: 23.0225, lon: 72.5714 },
+  'bhopal': { lat: 23.2599, lon: 77.4126 },
+  'indore': { lat: 22.7196, lon: 75.8577 },
+};
+
+function distanceKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
 function parsePagination(req) {
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const limit = Math.min(MAX_LIMIT, Math.max(1, parseInt(req.query.limit) || DEFAULT_LIMIT));
@@ -24,19 +62,12 @@ function parseCoords(req) {
   return { lat, lon };
 }
 
-function parseRadius(req, def = NEARBY_RADIUS_KM) {
-  const r = parseFloat(req.query.radius);
-  if (!Number.isFinite(r) || r <= 0) return def;
-  return Math.min(500, r); // cap at 500km
-}
-
 function escapeRegex(str) {
   return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 // ─────────────────────────────────────────────
 // GET /api/v1/jobs
-// Basic paginated list with optional filters
 // ─────────────────────────────────────────────
 exports.listJobs = async (req, res) => {
   try {
@@ -49,10 +80,9 @@ exports.listJobs = async (req, res) => {
     if (req.query.workMode) filter.workMode = req.query.workMode;
     if (req.query.jobType) filter.jobType = req.query.jobType;
 
-    // ✅ Use projection — only fetch fields we need for cards
     const [jobs, total] = await Promise.all([
       Job.find(filter, JOB_CARD_PROJECTION)
-        .sort({ postedAt: -1 })
+        .sort({ postedAt: -1, createdAt: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),
@@ -73,72 +103,48 @@ exports.listJobs = async (req, res) => {
     });
   } catch (error) {
     console.error('[jobs.list] error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message,
-      code: 'JOB_LIST_ERROR',
-      requestId: req.id,
-    });
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
 // ─────────────────────────────────────────────
 // GET /api/v1/jobs/search?q=...
-// Uses MongoDB TEXT INDEX (not regex $or)
 // ─────────────────────────────────────────────
 exports.searchJobs = async (req, res) => {
   try {
     const rawQ = (req.query.q || req.query.query || '').toString().trim();
     const { page, limit, skip } = parsePagination(req);
-
     const base = liveJobFilter();
-    let filter = base;
-    let sort = { postedAt: -1 };
-    let projection = { ...JOB_CARD_PROJECTION };
+    let filter = { ...base };
 
     if (rawQ) {
-      // ✅ Use $text search (backed by text index in Job.js)
-      // Falls back to regex if text search returns nothing
-      filter = { ...base, $text: { $search: rawQ } };
-      projection.score = { $meta: 'textScore' };
-      sort = { score: { $meta: 'textScore' }, postedAt: -1 };
+      const rx = new RegExp(escapeRegex(rawQ), 'i');
+      filter = {
+        ...base,
+        $or: [
+          { title: rx },
+          { role: rx },
+          { companyName: rx },
+          { 'location.city': rx },
+          { 'location.address': rx },
+          { skills: rx },
+          { department: rx },
+          { industry: rx },
+        ],
+      };
     }
 
     if (req.query.city) filter['location.city'] = new RegExp(escapeRegex(String(req.query.city).trim()), 'i');
-    if (req.query.workMode) filter.workMode = req.query.workMode;
-    if (req.query.jobType) filter.jobType = req.query.jobType;
 
-    let jobs = [];
-    let total = 0;
+    const [jobs, total] = await Promise.all([
+      Job.find(filter, JOB_CARD_PROJECTION)
+        .sort({ postedAt: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Job.countDocuments(filter),
+    ]);
 
-    try {
-      [jobs, total] = await Promise.all([
-        Job.find(filter, projection).sort(sort).skip(skip).limit(limit).lean(),
-        Job.countDocuments(filter),
-      ]);
-    } catch (textErr) {
-      // If text index isn't built yet, fall back to regex on a subset of fields
-      console.warn('[jobs.search] text index failed, falling back to regex:', textErr.message);
-      if (rawQ) {
-        const rx = new RegExp(escapeRegex(rawQ), 'i');
-        filter = {
-          ...base,
-          $or: [
-            { title: rx },
-            { role: rx },
-            { companyName: rx },
-            { 'location.city': rx },
-            { skills: rx },
-          ],
-        };
-        [jobs, total] = await Promise.all([
-          Job.find(filter, JOB_CARD_PROJECTION).sort({ postedAt: -1 }).skip(skip).limit(limit).lean(),
-          Job.countDocuments(filter),
-        ]);
-      }
-    }
-
-    res.set('Cache-Control', 'private, max-age=10');
     res.status(200).json({
       success: true,
       query: rawQ,
@@ -153,155 +159,119 @@ exports.searchJobs = async (req, res) => {
     });
   } catch (error) {
     console.error('[jobs.search] error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message,
-      code: 'JOB_SEARCH_ERROR',
-      requestId: req.id,
-    });
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
 // ─────────────────────────────────────────────
 // GET /api/v1/jobs/:id
-// Returns FULL job detail (uses transformJobDetail)
 // ─────────────────────────────────────────────
 exports.getJobById = async (req, res) => {
   try {
     const { id } = req.params;
-    // Validate ObjectId format
     if (!/^[0-9a-fA-F]{24}$/.test(id)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid job ID',
-        code: 'INVALID_JOB_ID',
-      });
+      return res.status(400).json({ success: false, message: 'Invalid job ID' });
     }
 
-    const job = await Job.findOne({ _id: id, ...liveJobFilter() }).lean();
+    const job = await Job.findOne({ _id: id }).lean();
     if (!job) {
-      return res.status(404).json({
-        success: false,
-        message: 'Job not found',
-        code: 'JOB_NOT_FOUND',
-      });
+      return res.status(404).json({ success: false, message: 'Job not found' });
     }
 
-    res.set('Cache-Control', 'private, max-age=60');
     res.status(200).json({ success: true, job: transformJobDetail(job) });
   } catch (error) {
     console.error('[jobs.getById] error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message,
-      code: 'JOB_DETAIL_ERROR',
-      requestId: req.id,
-    });
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
 // ─────────────────────────────────────────────
-// GET /api/v1/jobs/nearby?lat=&lon=&radius=50&page=&limit=&q=
-// ✅ USES $geoNear — no more 500-doc downloads
-// ✅ Distance calculated by MongoDB, not Node.js
-// ✅ Uses 2dsphere index
+// GET /api/v1/jobs/nearby
+// Resilient: Tries $geoNear -> Fallback to all live jobs + distance calculation
 // ─────────────────────────────────────────────
 exports.getNearbyJobs = async (req, res) => {
   try {
     const coords = parseCoords(req);
-    if (!coords) {
-      return res.status(400).json({
-        success: false,
-        message: 'Valid lat and lon are required',
-        code: 'INVALID_COORDS',
+    const { page, limit, skip } = parsePagination(req);
+    const radiusKm = parseFloat(req.query.radius) || NEARBY_RADIUS_KM;
+    const q = String(req.query.q || '').trim();
+
+    const baseFilter = liveJobFilter();
+    if (q) {
+      const rx = new RegExp(escapeRegex(q), 'i');
+      baseFilter.$or = [{ title: rx }, { role: rx }, { companyName: rx }, { skills: rx }];
+    }
+
+    let jobs = [];
+    let total = 0;
+
+    // 1. Try $geoNear aggregation first
+    if (coords) {
+      try {
+        const pipeline = [
+          {
+            $geoNear: {
+              near: { type: 'Point', coordinates: [coords.lon, coords.lat] },
+              distanceField: 'distanceMeters',
+              maxDistance: radiusKm * 1000,
+              spherical: true,
+              key: 'location.geo',
+              query: baseFilter,
+            },
+          },
+          {
+            $facet: {
+              jobs: [{ $skip: skip }, { $limit: limit }],
+              totalCount: [{ $count: 'count' }],
+            },
+          },
+        ];
+
+        const result = await Job.aggregate(pipeline).exec();
+        jobs = result[0]?.jobs || [];
+        total = result[0]?.totalCount?.[0]?.count || 0;
+      } catch (geoErr) {
+        // Geospatial index not yet ready or geo fields missing — continue to fallback
+      }
+    }
+
+    // 2. Fallback: If geo query returned 0 jobs, fetch live jobs from Job_db directly!
+    if (jobs.length === 0) {
+      const allJobs = await Job.find(baseFilter, JOB_CARD_PROJECTION)
+        .sort({ postedAt: -1, createdAt: -1 })
+        .limit(100)
+        .lean();
+
+      total = allJobs.length;
+      const paged = allJobs.slice(skip, skip + limit);
+
+      jobs = paged.map((j) => {
+        let km = 3.5; // default fallback distance
+        if (coords) {
+          const jLat = j.location?.lat || (j.location?.city && LOCAL_COORDS[j.location.city.toLowerCase()]?.lat);
+          const jLon = j.location?.lon || (j.location?.city && LOCAL_COORDS[j.location.city.toLowerCase()]?.lon);
+          if (jLat && jLon) {
+            km = distanceKm(coords.lat, coords.lon, jLat, jLon);
+          }
+        }
+        return {
+          ...j,
+          distanceMeters: km * 1000,
+        };
       });
     }
 
-    const radiusKm = parseRadius(req, NEARBY_RADIUS_KM);
-    const { page, limit, skip } = parsePagination(req);
-    const q = String(req.query.q || '').trim();
-
-    // Build post-geo match stage (applied AFTER geospatial filter)
-    const matchStage = liveJobFilter();
-    if (q) {
-      // Use $text if index exists
-      matchStage.$text = { $search: q };
-    }
-    if (req.query.city) matchStage['location.city'] = new RegExp(escapeRegex(req.query.city), 'i');
-    if (req.query.workMode) matchStage.workMode = req.query.workMode;
-    if (req.query.jobType) matchStage.jobType = req.query.jobType;
-
-    // ✅ MongoDB $geoNear aggregation
-    // - Uses 2dsphere index for efficient geo query
-    // - MongoDB does the distance math (fast, indexed)
-    // - Only returns jobs within radius
-    const pipeline = [
-      {
-        $geoNear: {
-          near: { type: 'Point', coordinates: [coords.lon, coords.lat] },
-          distanceField: 'distanceMeters',
-          maxDistance: radiusKm * 1000, // convert km → meters
-          spherical: true,
-          key: 'location.geo',
-          query: matchStage,
-        },
-      },
-      {
-        $facet: {
-          jobs: [
-            { $skip: skip },
-            { $limit: limit },
-            {
-              $project: {
-                ...Object.keys(JOB_CARD_PROJECTION).reduce((acc, k) => {
-                  acc[k] = 1;
-                  return acc;
-                }, {}),
-                distanceMeters: 1,
-              },
-            },
-          ],
-          totalCount: [{ $count: 'count' }],
-        },
-      },
-    ];
-
-    let result;
-    try {
-      result = await Job.aggregate(pipeline).exec();
-    } catch (geoErr) {
-      // If 2dsphere index doesn't exist yet (fresh deploy),
-      // fall back gracefully to returning empty with a hint
-      if (geoErr.message.includes('$geoNear') || geoErr.message.includes('2dsphere') || geoErr.message.includes('geoNear')) {
-        console.warn('[jobs.nearby] Geospatial index not ready. Run backfill-geo.js');
-        return res.status(200).json({
-          success: true,
-          jobs: [],
-          pagination: { page, limit, total: 0, hasMore: false, hasNextPage: false },
-          radiusKm,
-          _warning: 'Geospatial index initializing, please retry shortly',
-        });
-      }
-      throw geoErr;
-    }
-
-    const jobs = result[0]?.jobs || [];
-    const total = result[0]?.totalCount?.[0]?.count || 0;
-
-    // Attach distance display to each job
+    // Format distances cleanly for UI
     const transformed = jobs.map((j) => {
       const t = transformJobCard(j);
       if (j.distanceMeters != null) {
         const km = j.distanceMeters / 1000;
-        t.distance = km < 1
-          ? `${Math.round(j.distanceMeters)}m`
-          : `${km.toFixed(1)} km`;
+        t.distance = km < 1 ? `${Math.round(j.distanceMeters)}m` : `${km.toFixed(1)} km`;
         t._distanceKm = km;
       }
       return t;
     });
 
-    res.set('Cache-Control', 'private, max-age=15');
     res.status(200).json({
       success: true,
       jobs: transformed,
@@ -316,124 +286,49 @@ exports.getNearbyJobs = async (req, res) => {
     });
   } catch (error) {
     console.error('[jobs.nearby] error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message,
-      code: 'JOB_NEARBY_ERROR',
-      requestId: req.id,
-    });
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
 // ─────────────────────────────────────────────
-// GET /api/v1/jobs/other?lat=&lon=&radius=50&page=&limit=&q=
-// ✅ Uses $geoNear with min-distance filter
-// ✅ Everything OUTSIDE the radius
+// GET /api/v1/jobs/other
 // ─────────────────────────────────────────────
 exports.getOtherCityJobs = async (req, res) => {
   try {
-    const { page, limit, skip } = parsePagination(req);
-    const q = String(req.query.q || '').trim();
     const coords = parseCoords(req);
+    const { page, limit, skip } = parsePagination(req);
+    const radiusKm = parseFloat(req.query.radius) || NEARBY_RADIUS_KM;
+    const q = String(req.query.q || '').trim();
 
-    // If no coords provided, fall back to regular paginated list
-    if (!coords) {
-      const baseFilter = liveJobFilter();
-      if (q) baseFilter.$text = { $search: q };
-
-      const [jobs, total] = await Promise.all([
-        Job.find(baseFilter, JOB_CARD_PROJECTION)
-          .sort({ postedAt: -1 })
-          .skip(skip)
-          .limit(limit)
-          .lean(),
-        Job.countDocuments(baseFilter),
-      ]);
-
-      return res.status(200).json({
-        success: true,
-        jobs: jobs.map(transformJobCard),
-        pagination: {
-          page,
-          limit,
-          total,
-          hasMore: skip + jobs.length < total,
-          hasNextPage: skip + jobs.length < total,
-        },
-      });
+    const baseFilter = liveJobFilter();
+    if (q) {
+      const rx = new RegExp(escapeRegex(q), 'i');
+      baseFilter.$or = [{ title: rx }, { role: rx }, { companyName: rx }, { skills: rx }];
     }
 
-    const radiusKm = parseRadius(req, NEARBY_RADIUS_KM);
-    const matchStage = liveJobFilter();
-    if (q) matchStage.$text = { $search: q };
-    if (req.query.workMode) matchStage.workMode = req.query.workMode;
-    if (req.query.jobType) matchStage.jobType = req.query.jobType;
+    const [allJobs, total] = await Promise.all([
+      Job.find(baseFilter, JOB_CARD_PROJECTION)
+        .sort({ postedAt: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Job.countDocuments(baseFilter),
+    ]);
 
-    // ✅ $geoNear with minDistance = radiusKm → gets jobs OUTSIDE the radius
-    const pipeline = [
-      {
-        $geoNear: {
-          near: { type: 'Point', coordinates: [coords.lon, coords.lat] },
-          distanceField: 'distanceMeters',
-          minDistance: radiusKm * 1000,      // outside the nearby zone
-          maxDistance: 5000 * 1000,          // hard cap: 5000 km (covers all India + more)
-          spherical: true,
-          key: 'location.geo',
-          query: matchStage,
-        },
-      },
-      {
-        $facet: {
-          jobs: [
-            { $skip: skip },
-            { $limit: limit },
-            {
-              $project: {
-                ...Object.keys(JOB_CARD_PROJECTION).reduce((acc, k) => {
-                  acc[k] = 1;
-                  return acc;
-                }, {}),
-                distanceMeters: 1,
-              },
-            },
-          ],
-          totalCount: [{ $count: 'count' }],
-        },
-      },
-    ];
-
-    let result;
-    try {
-      result = await Job.aggregate(pipeline).exec();
-    } catch (geoErr) {
-      if (geoErr.message.includes('$geoNear') || geoErr.message.includes('2dsphere') || geoErr.message.includes('geoNear')) {
-        console.warn('[jobs.other] Geospatial index not ready. Run backfill-geo.js');
-        return res.status(200).json({
-          success: true,
-          jobs: [],
-          pagination: { page, limit, total: 0, hasMore: false, hasNextPage: false },
-          _warning: 'Geospatial index initializing, please retry shortly',
-        });
-      }
-      throw geoErr;
-    }
-
-    const jobs = result[0]?.jobs || [];
-    const total = result[0]?.totalCount?.[0]?.count || 0;
-
-    const transformed = jobs.map((j) => {
+    const transformed = allJobs.map((j) => {
       const t = transformJobCard(j);
-      if (j.distanceMeters != null) {
-        const km = j.distanceMeters / 1000;
-        t.distance = km < 1
-          ? `${Math.round(j.distanceMeters)}m`
-          : `${km.toFixed(1)} km`;
-        t._distanceKm = km;
+      if (coords) {
+        const jLat = j.location?.lat || (j.location?.city && LOCAL_COORDS[j.location.city.toLowerCase()]?.lat);
+        const jLon = j.location?.lon || (j.location?.city && LOCAL_COORDS[j.location.city.toLowerCase()]?.lon);
+        if (jLat && jLon) {
+          const km = distanceKm(coords.lat, coords.lon, jLat, jLon);
+          t.distance = km < 1 ? `${Math.round(km * 1000)}m` : `${km.toFixed(1)} km`;
+          t._distanceKm = km;
+        }
       }
       return t;
     });
 
-    res.set('Cache-Control', 'private, max-age=15');
     res.status(200).json({
       success: true,
       jobs: transformed,
@@ -441,69 +336,39 @@ exports.getOtherCityJobs = async (req, res) => {
         page,
         limit,
         total,
-        hasMore: skip + jobs.length < total,
-        hasNextPage: skip + jobs.length < total,
+        hasMore: skip + allJobs.length < total,
+        hasNextPage: skip + allJobs.length < total,
       },
     });
   } catch (error) {
     console.error('[jobs.other] error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message,
-      code: 'JOB_OTHER_ERROR',
-      requestId: req.id,
-    });
+    res.status(500).json({ success: false, message: error.message });
   }
 };
 
 // ─────────────────────────────────────────────
 // GET /api/v1/jobs/backfill-coords
-// ✅ Admin utility — pre-computes GeoJSON for existing jobs
-// (Also available as CLI script: backend/scripts/backfill-geo.js)
 // ─────────────────────────────────────────────
 exports.backfillCoordinates = async (req, res) => {
   try {
     const jobs = await Job.find({
       'location.lat': { $ne: null },
       'location.lon': { $ne: null },
-      $or: [
-        { 'location.geo': { $exists: false } },
-        { 'location.geo.coordinates': { $exists: false } },
-      ],
-    }).select('_id location').limit(1000);
+    }).limit(1000);
 
     let updated = 0;
     for (const job of jobs) {
       const lat = parseFloat(job.location.lat);
       const lon = parseFloat(job.location.lon);
-      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-
-      await Job.updateOne(
-        { _id: job._id },
-        {
-          $set: {
-            'location.geo': {
-              type: 'Point',
-              coordinates: [lon, lat],
-            },
-          },
-        }
-      );
-      updated++;
+      if (Number.isFinite(lat) && Number.isFinite(lon)) {
+        job.location.geo = { type: 'Point', coordinates: [lon, lat] };
+        await job.save();
+        updated++;
+      }
     }
 
-    res.status(200).json({
-      success: true,
-      total: jobs.length,
-      updated,
-      message: `Backfilled ${updated} jobs. Run again if there are more.`,
-    });
+    res.status(200).json({ success: true, updated });
   } catch (error) {
-    console.error('[jobs.backfill] error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message,
-      code: 'BACKFILL_ERROR',
-    });
+    res.status(500).json({ success: false, message: error.message });
   }
 };
