@@ -4,22 +4,43 @@ const cloudinary = require('../config/cloudinary');
 const uniq = (arr) =>
   Array.isArray(arr) ? [...new Set(arr.filter(Boolean).map(String))] : [];
 
+// ─────────────────────────────────────────────
+// PROFILE PROJECTION — only fields the mobile app needs
+// ─────────────────────────────────────────────
 const PROFILE_PROJECTION = {
   __v: 0,
   fcmTokens: 0,
 };
 
 // ─────────────────────────────────────────────
-// ✅ Auto-heal broken legacy resume URLs in API responses.
-// Old records stored with /image/upload/...pdf return 404.
-// This rewrites the URL on-the-fly WITHOUT touching the database.
+// ✅ Generates a Cryptographically Signed URL 
+// to bypass Cloudinary's raw PDF delivery restrictions
 // ─────────────────────────────────────────────
-function healResumeUrl(url) {
-  if (!url || typeof url !== 'string') return url;
-  if (url.includes('/image/upload/') && url.toLowerCase().endsWith('.pdf')) {
-    return url.replace('/image/upload/', '/raw/upload/');
+function generateSecureResumeUrl(user) {
+  if (!user || !user.resumeUrl) return '';
+
+  // Fallback: If it's an old broken image URL, clean it up first
+  let targetPublicId = user.resumePublicId;
+  if (!targetPublicId) {
+    let url = user.resumeUrl;
+    if (url.includes('/image/upload/') && url.toLowerCase().endsWith('.pdf')) {
+      url = url.replace('/image/upload/', '/raw/upload/');
+    }
+    return url;
   }
-  return url;
+
+  try {
+    // Generate secure signed URL using backend api_secret
+    return cloudinary.url(targetPublicId, {
+      resource_type: 'raw',
+      type: 'upload',
+      sign_url: true, // Appends security signature to bypass ACL checks
+      secure: true,
+    });
+  } catch (err) {
+    console.error('[profileController.generateSecureResumeUrl] Error:', err.message);
+    return user.resumeUrl;
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -36,13 +57,14 @@ exports.getMyProfile = async (req, res) => {
       });
     }
 
+    // Normalize arrays
     user.skills = uniq(user.skills);
     user.knownLanguages = uniq(user.knownLanguages);
     user.assets = uniq(user.assets);
     user.certifications = uniq(user.certifications);
 
-    // ✅ Auto-heal legacy resume URL
-    user.resumeUrl = healResumeUrl(user.resumeUrl);
+    // ✅ Secure & sign the resume URL
+    user.resumeUrl = generateSecureResumeUrl(user);
 
     res.set('Cache-Control', 'private, max-age=30');
     res.status(200).json({ success: true, data: user });
@@ -103,8 +125,8 @@ exports.updateMyProfile = async (req, res) => {
     data.assets = uniq(data.assets);
     data.certifications = uniq(data.certifications);
 
-    // ✅ Auto-heal legacy resume URL
-    data.resumeUrl = healResumeUrl(data.resumeUrl);
+    // ✅ Secure & sign the resume URL
+    data.resumeUrl = generateSecureResumeUrl(data);
 
     res.status(200).json({ success: true, message: 'Profile saved', data });
   } catch (error) {
@@ -179,7 +201,7 @@ exports.uploadAvatar = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────
-// POST /api/profile/upload-resume (UNCHANGED — already correct)
+// POST /api/profile/upload-resume (UPDATED)
 // ─────────────────────────────────────────────
 exports.uploadResume = async (req, res) => {
   try {
@@ -196,6 +218,7 @@ exports.uploadResume = async (req, res) => {
       });
     }
 
+    // Cleanup old resume from Cloudinary
     if (user.resumePublicId) {
       try { await cloudinary.uploader.destroy(user.resumePublicId, { resource_type: 'raw' }); } catch (_) {}
       try { await cloudinary.uploader.destroy(user.resumePublicId, { resource_type: 'image' }); } catch (_) {}
@@ -236,11 +259,14 @@ exports.uploadResume = async (req, res) => {
 
     console.log(`[ResumeUpload] ✅ Saved resume for ${user._id}: ${resumeUrl}`);
 
+    // Return the secure, signed URL directly to the client
+    const signedResumeUrl = generateSecureResumeUrl(user);
+
     res.status(200).json({
       success: true,
       message: 'Resume uploaded successfully',
       data: {
-        resumeUrl: user.resumeUrl,
+        resumeUrl: signedResumeUrl,
         resumeFileName: user.resumeFileName,
         profileCompletion: user.profileCompletion,
       },
@@ -290,9 +316,15 @@ exports.getAllProfiles = async (req, res) => {
       User.countDocuments(filter),
     ]);
 
+    // Apply signed URLs to all returned Light-weight Profile Cards
+    const enrichedUsers = users.map(u => ({
+      ...u,
+      resumeUrl: generateSecureResumeUrl(u),
+    }));
+
     res.status(200).json({
       success: true,
-      data: users,
+      data: enrichedUsers,
       pagination: {
         page,
         limit,
