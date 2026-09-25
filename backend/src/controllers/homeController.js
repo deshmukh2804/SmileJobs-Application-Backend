@@ -3,13 +3,12 @@ const Banner = require('../models/Banner');
 const Job = require('../models/Job');
 
 // ─────────────────────────────────────────────
-// RAW collection access — safely handles buffering & schemas
+// RAW collection access — safe with fallbacks
 // ─────────────────────────────────────────────
 const rawCollection = (name) => {
   if (mongoose.connection && mongoose.connection.db) {
     return mongoose.connection.db.collection(name);
   }
-  // Safe buffering fallback if the direct connection is not fully initialized on boot
   try {
     const model = mongoose.models.AppConfig || mongoose.model('AppConfig');
     if (model) return model.collection;
@@ -47,6 +46,37 @@ const liveJobFilter = () => {
     isActive: true,
     $or: [{ expiryDate: { $gte: now } }, { expiryDate: null }, { expiryDate: { $exists: false } }],
   };
+};
+
+// ─────────────────────────────────────────────
+// MongoDB PROJECTIONS — only fetch what we need
+// ─────────────────────────────────────────────
+// For list views (cards) — small payload
+const JOB_CARD_PROJECTION = {
+  title: 1,
+  companyName: 1,
+  companyLogo: 1,
+  companyInitials: 1,
+  'location.address': 1,
+  'location.city': 1,
+  'location.state': 1,
+  'location.lat': 1,
+  'location.lon': 1,
+  salary: 1,
+  experience: 1,
+  jobType: 1,
+  workMode: 1,
+  skills: 1,
+  featured: 1,
+  isNew: 1,
+  postedAt: 1,
+  createdAt: 1,
+  // Contact visibility (needed for badges)
+  contactVisibility: 1,
+  whatsappContactEnabled: 1,
+  // Badge computation
+  status: 1,
+  isActive: 1,
 };
 
 // ─────────────────────────────────────────────
@@ -99,17 +129,16 @@ function formatExperience(exp) {
 const BG_PALETTE = ['#E0D4FC', '#FDE8D4', '#D4F5E9', '#FCE0E9', '#D4E9FC', '#F5E9D4'];
 
 // ─────────────────────────────────────────────
-// Transform Job → mobile shape
+// LIGHTWEIGHT: Transform Job → job card (for lists)
+// ~10x smaller payload than transformJobDetail
 // ─────────────────────────────────────────────
-const transformJob = (job) => {
+const transformJobCard = (job) => {
   if (!job) return null;
   const j = job.toObject ? job.toObject() : job;
 
   const salaryStr = formatSalary(j.salary);
   const experienceStr = formatExperience(j.experience);
-
   const cityOnly = j.location?.city || j.location?.state || 'Remote';
-
   const fullLocation = j.location
     ? [j.location.city, j.location.state].filter(Boolean).join(', ') || 'Remote'
     : 'Remote';
@@ -117,11 +146,7 @@ const transformJob = (job) => {
   const companyName = j.companyName || 'Company';
   const companyInitial = (j.companyInitials || companyName.charAt(0) || 'C').toUpperCase();
   const bgIdx = (companyName.length || 0) % BG_PALETTE.length;
-
   const companyLogoUrl = j.companyLogo?.url || '';
-  const companyGallery = Array.isArray(j.companyImages)
-    ? j.companyImages.map((img) => img?.url).filter(Boolean)
-    : [];
 
   return {
     id: String(j._id),
@@ -130,14 +155,10 @@ const transformJob = (job) => {
     companyLogoText: companyInitial,
     companyLogoBg: BG_PALETTE[bgIdx],
     companyLogoUrl,
-    companyImages: companyGallery,
-
     city: cityOnly,
     location: fullLocation,
     state: j.location?.state || '',
     address: j.location?.address || '',
-
-    distance: '5 km',
     salary: salaryStr,
     salaryPeriod: `/${j.salary?.period || 'month'}`,
     experience: experienceStr,
@@ -151,6 +172,31 @@ const transformJob = (job) => {
       : j.isNew
       ? { text: 'NEW', type: 'actively-hiring' }
       : undefined,
+    featured: !!j.featured,
+    isNew: !!j.isNew,
+    isSaved: false,
+    // Distance filled in by geospatial queries where applicable
+    // distance: undefined,
+  };
+};
+
+// ─────────────────────────────────────────────
+// FULL: Transform Job → detail view (all fields)
+// Used ONLY for job detail endpoint
+// ─────────────────────────────────────────────
+const transformJobDetail = (job) => {
+  if (!job) return null;
+  const card = transformJobCard(job);
+  if (!card) return null;
+
+  const j = job.toObject ? job.toObject() : job;
+  const companyGallery = Array.isArray(j.companyImages)
+    ? j.companyImages.map((img) => img?.url).filter(Boolean)
+    : [];
+
+  return {
+    ...card,
+    companyImages: companyGallery,
     description: j.jobDescription || '',
     noticePeriod: j.noticePeriod || '',
     requirements: {
@@ -177,7 +223,7 @@ const transformJob = (job) => {
       industry: j.industry || '',
       perks: j.benefits || [],
       website: j.companyWebsite || '',
-      logoUrl: companyLogoUrl,
+      logoUrl: j.companyLogo?.url || '',
       gallery: companyGallery,
     },
     hrContact: {
@@ -193,11 +239,11 @@ const transformJob = (job) => {
       mobile: j.contactVisibility?.mobile !== false,
     },
     benefits: j.benefits || [],
-    featured: !!j.featured,
-    isNew: !!j.isNew,
-    isSaved: false,
   };
 };
+
+// Backward-compat alias (existing code uses `transformJob`)
+const transformJob = transformJobCard;
 
 // ─────────────────────────────────────────────
 // Transform Banner
@@ -269,12 +315,8 @@ async function getBottomNavFromDB() {
     const doc = await col.findOne({ configType: 'mobileBottomNav' });
 
     if (doc && doc.bottomNav && Array.isArray(doc.bottomNav.items) && doc.bottomNav.items.length > 0) {
-      console.log('🧭 [DB] bottomNav found:',
-        doc.bottomNav.items.map(i => `${i.key}(${i.enabled ? 'ON' : 'OFF'},o${i.order})`).join(' '));
       return doc.bottomNav;
     }
-
-    console.log('🧭 [DB] No mobileBottomNav config found — using default');
     return DEFAULT_BOTTOM_NAV;
   } catch (err) {
     console.error('🧭 [DB] bottomNav read error:', err.message);
@@ -300,7 +342,11 @@ async function getHomeSectionsFromDB() {
 }
 
 // ─────────────────────────────────────────────
-// GET /api/v1/home
+// GET /api/v1/home  (SDUI)
+// - Uses parallel fetch for sections
+// - Error isolation per section
+// - Lightweight projections
+// - Cache headers for CDN
 // ─────────────────────────────────────────────
 exports.getHomeConfig = async (req, res) => {
   try {
@@ -310,12 +356,13 @@ exports.getHomeConfig = async (req, res) => {
       .filter((s) => s.enabled !== false)
       .sort((a, b) => (a.order || 0) - (b.order || 0));
 
-    const totalBanners = await Banner.countDocuments({});
-    const activeBanners = await Banner.countDocuments(activeBannerFilter('home_hero'));
-    const totalJobs = await Job.countDocuments({});
-    const liveJobs = await Job.countDocuments(liveJobFilter());
-    console.log(`📊 Home: banners ${activeBanners}/${totalBanners} active | jobs ${liveJobs}/${totalJobs} live`);
+    // Parallel job/banner counts (used in meta)
+    const [liveJobs, activeBanners] = await Promise.all([
+      Job.countDocuments(liveJobFilter()).catch(() => 0),
+      Banner.countDocuments(activeBannerFilter('home_hero')).catch(() => 0),
+    ]);
 
+    // Fetch every section IN PARALLEL with error isolation
     const results = await Promise.all(
       sections.map(async (section) => {
         try {
@@ -336,33 +383,49 @@ exports.getHomeConfig = async (req, res) => {
           if (section.type === 'jobs') {
             let filter = liveJobFilter();
             let sort = { postedAt: -1 };
-            if (section.sectionKey === 'featuredJobs') { filter.featured = true; sort = { priority: -1, postedAt: -1 }; }
-            else if (section.sectionKey === 'newJobs') { filter.isNew = true; }
+            if (section.sectionKey === 'featuredJobs') {
+              filter.featured = true;
+              sort = { priority: -1, postedAt: -1 };
+            } else if (section.sectionKey === 'newJobs') {
+              filter.isNew = true;
+            }
 
-            const jobs = await Job.find(filter).sort(sort).limit(section.limit || 20).lean();
+            const jobs = await Job.find(filter, JOB_CARD_PROJECTION)
+              .sort(sort)
+              .limit(section.limit || 20)
+              .lean();
+
             return {
               type: 'jobs',
               sectionKey: section.sectionKey,
               title: section.title || 'Jobs',
               enabled: true,
               order: section.order,
-              items: jobs.map(transformJob),
+              items: jobs.map(transformJobCard),
             };
           }
 
           if (section.type === 'featuredJob') {
-            let job = await Job.findOne({ ...liveJobFilter(), featured: true })
-              .sort({ priority: -1, postedAt: -1 }).lean();
-            if (!job) job = await Job.findOne(liveJobFilter()).sort({ postedAt: -1 }).lean();
+            let job = await Job.findOne(
+              { ...liveJobFilter(), featured: true },
+              JOB_CARD_PROJECTION
+            ).sort({ priority: -1, postedAt: -1 }).lean();
+
+            if (!job) {
+              job = await Job.findOne(liveJobFilter(), JOB_CARD_PROJECTION)
+                .sort({ postedAt: -1 })
+                .lean();
+            }
             return {
               type: 'featuredJob',
               sectionKey: section.sectionKey || 'featuredJob',
               enabled: true,
               order: section.order,
-              items: job ? [transformJob(job)] : [],
+              items: job ? [transformJobCard(job)] : [],
             };
           }
 
+          // Static/config sections (no DB query)
           return {
             type: section.type,
             sectionKey: section.sectionKey || section.type,
@@ -371,14 +434,24 @@ exports.getHomeConfig = async (req, res) => {
             config: section.config || {},
           };
         } catch (err) {
-          console.error(`⚠️ Section ${section.type} failed:`, err.message);
-          return { type: section.type, sectionKey: section.sectionKey || section.type, enabled: true, order: section.order, items: [], error: true };
+          // ✅ ERROR ISOLATION: One failing section does NOT kill the whole home screen
+          console.error(`⚠️ Section "${section.type}" failed:`, err.message);
+          return {
+            type: section.type,
+            sectionKey: section.sectionKey || section.type,
+            enabled: true,
+            order: section.order,
+            items: [],
+            error: true,
+          };
         }
       })
     );
 
     const bottomNav = await getBottomNavFromDB();
-    const activeJobsCount = liveJobs;
+
+    // Short cache headers for mobile clients — allows CDN/proxy caching too
+    res.set('Cache-Control', 'private, max-age=30, stale-while-revalidate=60');
 
     res.status(200).json({
       success: true,
@@ -387,14 +460,19 @@ exports.getHomeConfig = async (req, res) => {
       sections: results,
       bottomNav,
       meta: {
-        activeJobsCount,
+        activeJobsCount: liveJobs,
+        activeBannersCount: activeBanners,
         serverTime: new Date().toISOString(),
-        debug: { totalBanners, activeBanners, totalJobs, liveJobs },
       },
     });
   } catch (error) {
     console.error('❌ getHomeConfig error:', error);
-    res.status(500).json({ success: false, message: error.message });
+    res.status(500).json({
+      success: false,
+      message: error.message,
+      code: 'HOME_CONFIG_ERROR',
+      requestId: req.id,
+    });
   }
 };
 
@@ -404,15 +482,21 @@ exports.getHomeConfig = async (req, res) => {
 exports.getBottomNav = async (req, res) => {
   try {
     const bottomNav = await getBottomNavFromDB();
+    res.set('Cache-Control', 'private, max-age=300'); // 5 min cache
     res.status(200).json({ success: true, bottomNav });
   } catch (error) {
     console.error('❌ getBottomNav error:', error);
-    res.status(500).json({ success: false, bottomNav: DEFAULT_BOTTOM_NAV, message: error.message });
+    res.status(500).json({
+      success: false,
+      bottomNav: DEFAULT_BOTTOM_NAV,
+      message: error.message,
+      requestId: req.id,
+    });
   }
 };
 
 // ─────────────────────────────────────────────
-// GET /api/v1/debug/appconfigs  (temporary diagnostic)
+// GET /api/v1/debug/appconfigs  (diagnostic)
 // ─────────────────────────────────────────────
 exports.debugAppConfigs = async (req, res) => {
   try {
@@ -432,4 +516,13 @@ exports.debugAppConfigs = async (req, res) => {
   }
 };
 
-exports._helpers = { activeBannerFilter, liveJobFilter, transformJob, transformBanner };
+// Exports
+exports._helpers = {
+  activeBannerFilter,
+  liveJobFilter,
+  transformJob,           // backward-compat alias → transformJobCard
+  transformJobCard,
+  transformJobDetail,
+  transformBanner,
+  JOB_CARD_PROJECTION,
+};

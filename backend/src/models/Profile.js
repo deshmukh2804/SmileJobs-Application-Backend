@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { careerflowAdminDbConnection } = require('../config/db');
 
 const profileSchema = new mongoose.Schema(
   {
@@ -6,14 +7,14 @@ const profileSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
       required: true,
-      unique: true,
+      unique: true, // Automatically creates the unique index on userId
     },
     // ── Personal Info ──
     name: { type: String, default: '' },
     email: { type: String, default: '' },
     phoneNumber: { type: String, default: '' },
     gender: { type: String, enum: ['Male', 'Female', 'Other', ''], default: '' },
-    birthday: { type: String, default: '' }, // YYYY-MM-DD
+    birthday: { type: String, default: '' },
     avatarUrl: { type: String, default: '' },
 
     // ── Location ──
@@ -29,7 +30,7 @@ const profileSchema = new mongoose.Schema(
     knownLanguages: [{ type: String }],
 
     // ── Experience ──
-    totalExperience: { type: String, default: '' }, // e.g. "6 Months"
+    totalExperience: { type: String, default: '' },
     experienceLevel: {
       type: String,
       enum: ['Fresher', 'Experience', ''],
@@ -50,16 +51,19 @@ const profileSchema = new mongoose.Schema(
     // ── Resume ──
     resumeUrl: { type: String, default: '' },
     resumeFileName: { type: String, default: '' },
-    resumePublicId: { type: String, default: '' }, // for Cloudinary delete
+    resumePublicId: { type: String, default: '' },
 
     // ── Profile Completion ──
-    profileCompletion: { type: Number, default: 0 }, // 0-100
+    profileCompletion: { type: Number, default: 0 },
 
     // ── Visibility for recruiters ──
     isVisibleToRecruiters: { type: Boolean, default: true },
   },
   { timestamps: true }
 );
+
+// Indexes for common queries (duplicate userId index removed)
+profileSchema.index({ city: 1, isVisibleToRecruiters: 1 });
 
 // Auto-calculate profile completion before save
 profileSchema.pre('save', function (next) {
@@ -76,4 +80,7 @@ profileSchema.pre('save', function (next) {
   next();
 });
 
-module.exports = mongoose.model('Profile', profileSchema);
+// ✅ Bind Profile model to the careerflow_admin DB connection
+module.exports =
+  careerflowAdminDbConnection.models.Profile ||
+  careerflowAdminDbConnection.model('Profile', profileSchema);

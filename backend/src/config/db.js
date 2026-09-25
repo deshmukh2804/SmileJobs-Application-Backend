@@ -7,60 +7,95 @@ if (!mongoURI) {
   process.exit(1);
 }
 
-// ─── SECONDARY CONNECTION: Job_db (Synchronous Instantiation) ───
-// This compiles immediately to prevent schema-registration race conditions during boot
+// ─────────────────────────────────────────────────────────────
+// PRODUCTION-GRADE CONNECTION OPTIONS (tuned for 200k MAU)
+// ─────────────────────────────────────────────────────────────
+const CONNECTION_OPTIONS = {
+  // Connection Pool — reuse connections across requests
+  maxPoolSize: 50,              // Max concurrent connections per instance
+  minPoolSize: 5,               // Keep 5 connections warm
+  maxIdleTimeMS: 30000,         // Close idle connections after 30s
+
+  // Timeouts — fail fast, don't hang forever
+  serverSelectionTimeoutMS: 10000,  // 10s to find a server
+  socketTimeoutMS: 45000,           // 45s for socket operations
+  connectTimeoutMS: 10000,          // 10s to establish connection
+
+  // Reliability
+  retryWrites: true,
+  retryReads: true,
+
+  // Performance
+  compressors: ['zlib'],            // Compress network traffic
+  zlibCompressionLevel: 6,
+
+  // Family — force IPv4 (avoids DNS issues on Render)
+  family: 4,
+};
+
+// Helper: attach standard event listeners to any connection
+function attachListeners(conn, label) {
+  conn.on('connected', () => {
+    console.log(`✅ MongoDB Connected (${label}): ${conn.host}/${conn.name}`);
+  });
+  conn.on('error', (err) => {
+    console.error(`❌ ${label} Connection Error: ${err.message}`);
+  });
+  conn.on('disconnected', () => {
+    console.warn(`⚠️  ${label} Disconnected`);
+  });
+  conn.on('reconnected', () => {
+    console.log(`🔄 ${label} Reconnected`);
+  });
+}
+
+// ─── SECONDARY CONNECTION: Job_db ───
 const jobDbConnection = mongoose.createConnection(mongoURI, {
+  ...CONNECTION_OPTIONS,
   dbName: "Job_db",
 });
+attachListeners(jobDbConnection, 'Job_db');
 
-jobDbConnection.on("connected", () => {
-  console.log(
-    `✅ MongoDB Connected (User App Jobs DB): ${jobDbConnection.host}/${jobDbConnection.name}`
-  );
-});
-
-jobDbConnection.on("error", (err) => {
-  console.error(`❌ Job_db Connection Error: ${err.message}`);
-});
-
-// ─── TERTIARY CONNECTION: application_db (Synchronous Instantiation) ───
-// This ensures all Applications are stored in a dedicated database
+// ─── TERTIARY CONNECTION: application_db ───
 const applicationDbConnection = mongoose.createConnection(mongoURI, {
+  ...CONNECTION_OPTIONS,
   dbName: "application_db",
 });
+attachListeners(applicationDbConnection, 'application_db');
 
-applicationDbConnection.on("connected", () => {
-  console.log(
-    `✅ MongoDB Connected (Applications DB): ${applicationDbConnection.host}/${applicationDbConnection.name}`
-  );
-});
-
-applicationDbConnection.on("error", (err) => {
-  console.error(`❌ application_db Connection Error: ${err.message}`);
-});
-
-// ─── QUATERNARY CONNECTION: careerflow_admin (Synchronous Instantiation) ───
-// ✅ This is where the ORIGINAL User profile data lives (users collection)
-// All User model reads/writes go here — auth, profile, FCM tokens, everything.
+// ─── QUATERNARY CONNECTION: careerflow_admin (Users live here) ───
 const careerflowAdminDbConnection = mongoose.createConnection(mongoURI, {
+  ...CONNECTION_OPTIONS,
   dbName: "careerflow_admin",
 });
+attachListeners(careerflowAdminDbConnection, 'careerflow_admin');
 
-careerflowAdminDbConnection.on("connected", () => {
-  console.log(
-    `✅ MongoDB Connected (Careerflow Admin DB — Users): ${careerflowAdminDbConnection.host}/${careerflowAdminDbConnection.name}`
-  );
-});
-
-careerflowAdminDbConnection.on("error", (err) => {
-  console.error(`❌ careerflow_admin Connection Error: ${err.message}`);
-});
-
-// ─── PRIMARY CONNECTION FUNCTION: careerflow_admin (or default) ───
+// ─── PRIMARY CONNECTION FUNCTION (default mongoose connection) ───
 const connectDB = async () => {
   try {
-    const conn = await mongoose.connect(mongoURI);
-    console.log(`✅ MongoDB Connected (Primary): ${conn.connection.host}/${conn.connection.name}`);
+    // Use careerflow_admin as the default DB so ANY code using
+    // mongoose.model() or mongoose.connection.db goes to the right place
+    await mongoose.connect(mongoURI, {
+      ...CONNECTION_OPTIONS,
+      dbName: "careerflow_admin",
+    });
+    console.log(`✅ MongoDB Connected (Primary/Default): ${mongoose.connection.host}/${mongoose.connection.name}`);
+
+    // Set global mongoose config for production
+    mongoose.set('strictQuery', true);
+
+    // Graceful shutdown
+    process.on('SIGINT', async () => {
+      console.log('🛑 SIGINT received — closing MongoDB connections...');
+      await Promise.all([
+        mongoose.connection.close(),
+        jobDbConnection.close(),
+        applicationDbConnection.close(),
+        careerflowAdminDbConnection.close(),
+      ]);
+      console.log('✅ All MongoDB connections closed');
+      process.exit(0);
+    });
   } catch (error) {
     console.error(`❌ MongoDB Error: ${error.message}`);
     process.exit(1);

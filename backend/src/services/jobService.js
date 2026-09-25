@@ -1,158 +1,116 @@
 const Job = require('../models/Job');
-const { geocodeCity, distanceKm } = require('./locationService');
+const { _helpers } = require('../controllers/homeController');
+const { liveJobFilter, JOB_CARD_PROJECTION } = _helpers;
 
-// ── Simple Nominatim geocoder with caching ──
-const geoCache = new Map();
-
-async function geocodeJobLocation(job) {
-  const loc = job.location || {};
-  const address = loc.address || '';
-  const city = loc.city || '';
-  const state = loc.state || '';
-
-  const query = [address, city, state, 'India'].filter(Boolean).join(', ');
-  if (!query) return null;
-
-  if (geoCache.has(query)) return geoCache.get(query);
-
-  const geo = await geocodeCity(query);
-  if (geo) {
-    geoCache.set(query, geo);
-    return geo;
-  }
-
-  // Fallback: try city + state only
-  const fallback = [city, state, 'India'].filter(Boolean).join(', ');
-  if (fallback && fallback !== query) {
-    const geo2 = await geocodeCity(fallback);
-    if (geo2) {
-      geoCache.set(query, geo2);
-      return geo2;
-    }
-  }
-  return null;
-}
-
-// ── Normalize text for fuzzy matching (case + whitespace + special chars) ──
-function normalize(text) {
-  return String(text || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-// ── Check if any word in query matches any field ──
-function fuzzyMatch(job, queryWords) {
-  if (!queryWords || queryWords.length === 0) return true;
-
-  const searchable = [
-    job.title,
-    job.role,
-    job.department,
-    job.industry,
-    job.companyName,
-    job.jobDescription,
-    job.qualification,
-    job.workMode,
-    job.jobType,
-    job.location?.address,
-    job.location?.city,
-    job.location?.state,
-    job.location?.country,
-    ...(job.skills || []),
-    ...(job.languages || []),
-    ...(job.benefits || []),
-  ]
-    .filter(Boolean)
-    .map(normalize)
-    .join(' ');
-
-  // ALL query words must match somewhere in searchable text
-  return queryWords.every((qw) => searchable.includes(qw));
-}
-
-// ── PUBLIC: Fetch Nearby Jobs within radius ──
-async function getNearbyJobs({ lat, lon, radiusKm = 50, page = 1, limit = 50, q = '' }) {
+/**
+ * Fetch nearby jobs using MongoDB $geoNear.
+ * Consolidates the duplicate logic that used to live in jobController.js AND jobService.js.
+ *
+ * @param {Object} params
+ * @param {number} params.lat
+ * @param {number} params.lon
+ * @param {number} [params.radiusKm=50]
+ * @param {number} [params.page=1]
+ * @param {number} [params.limit=20]
+ * @param {string} [params.q]
+ * @returns {Promise<{jobs: Array, total: number, hasMore: boolean}>}
+ */
+async function getNearbyJobs({ lat, lon, radiusKm = 50, page = 1, limit = 20, q = '' }) {
   const skip = (page - 1) * limit;
-  const queryWords = normalize(q).split(' ').filter((w) => w.length >= 2);
+  const matchStage = liveJobFilter();
+  if (q) matchStage.$text = { $search: q };
 
-  // Base filter: only active jobs
-  const baseFilter = { status: 'Live', isActive: true };
+  const pipeline = [
+    {
+      $geoNear: {
+        near: { type: 'Point', coordinates: [lon, lat] },
+        distanceField: 'distanceMeters',
+        maxDistance: radiusKm * 1000,
+        spherical: true,
+        key: 'location.geo',
+        query: matchStage,
+      },
+    },
+    {
+      $facet: {
+        jobs: [
+          { $skip: skip },
+          { $limit: limit },
+          {
+            $project: {
+              ...Object.keys(JOB_CARD_PROJECTION).reduce((acc, k) => {
+                acc[k] = 1;
+                return acc;
+              }, {}),
+              distanceMeters: 1,
+            },
+          },
+        ],
+        totalCount: [{ $count: 'count' }],
+      },
+    },
+  ];
 
-  // Fetch generous batch to filter locally by geo + fuzzy
-  const allJobs = await Job.find(baseFilter)
-    .sort({ createdAt: -1 })
-    .limit(500)
-    .lean();
+  const result = await Job.aggregate(pipeline).exec();
+  const jobs = result[0]?.jobs || [];
+  const total = result[0]?.totalCount?.[0]?.count || 0;
 
-  const enriched = [];
-  for (const job of allJobs) {
-    // Fuzzy text match (query words in title/city/address/skills/etc.)
-    if (queryWords.length && !fuzzyMatch(job, queryWords)) continue;
-
-    // Geocode job location
-    const geo = await geocodeJobLocation(job);
-    if (!geo) continue;
-
-    const dist = distanceKm(lat, lon, geo.lat, geo.lon);
-    if (dist <= radiusKm) {
-      enriched.push({
-        ...job,
-        _distanceKm: dist,
-        _coords: { lat: geo.lat, lon: geo.lon },
-      });
-    }
-  }
-
-  // Sort by distance
-  enriched.sort((a, b) => a._distanceKm - b._distanceKm);
-
-  const paginated = enriched.slice(skip, skip + limit);
   return {
-    jobs: paginated,
-    total: enriched.length,
-    hasMore: skip + paginated.length < enriched.length,
+    jobs,
+    total,
+    hasMore: skip + jobs.length < total,
   };
 }
 
-// ── PUBLIC: Fetch Other City Jobs (outside radius) ──
-async function getOtherCityJobs({ lat, lon, radiusKm = 50, page = 1, limit = 50, q = '' }) {
+/**
+ * Fetch jobs OUTSIDE the given radius (other cities).
+ */
+async function getOtherCityJobs({ lat, lon, radiusKm = 50, page = 1, limit = 20, q = '' }) {
   const skip = (page - 1) * limit;
-  const queryWords = normalize(q).split(' ').filter((w) => w.length >= 2);
+  const matchStage = liveJobFilter();
+  if (q) matchStage.$text = { $search: q };
 
-  const baseFilter = { status: 'Live', isActive: true };
+  const pipeline = [
+    {
+      $geoNear: {
+        near: { type: 'Point', coordinates: [lon, lat] },
+        distanceField: 'distanceMeters',
+        minDistance: radiusKm * 1000,
+        maxDistance: 5000 * 1000,
+        spherical: true,
+        key: 'location.geo',
+        query: matchStage,
+      },
+    },
+    {
+      $facet: {
+        jobs: [
+          { $skip: skip },
+          { $limit: limit },
+          {
+            $project: {
+              ...Object.keys(JOB_CARD_PROJECTION).reduce((acc, k) => {
+                acc[k] = 1;
+                return acc;
+              }, {}),
+              distanceMeters: 1,
+            },
+          },
+        ],
+        totalCount: [{ $count: 'count' }],
+      },
+    },
+  ];
 
-  const allJobs = await Job.find(baseFilter)
-    .sort({ createdAt: -1 })
-    .limit(500)
-    .lean();
+  const result = await Job.aggregate(pipeline).exec();
+  const jobs = result[0]?.jobs || [];
+  const total = result[0]?.totalCount?.[0]?.count || 0;
 
-  const enriched = [];
-  for (const job of allJobs) {
-    if (queryWords.length && !fuzzyMatch(job, queryWords)) continue;
-
-    const geo = await geocodeJobLocation(job);
-    if (!geo) continue;
-
-    const dist = distanceKm(lat, lon, geo.lat, geo.lon);
-    if (dist > radiusKm) {
-      enriched.push({
-        ...job,
-        _distanceKm: dist,
-        _coords: { lat: geo.lat, lon: geo.lon },
-      });
-    }
-  }
-
-  enriched.sort((a, b) => a._distanceKm - b._distanceKm);
-
-  const paginated = enriched.slice(skip, skip + limit);
   return {
-    jobs: paginated,
-    total: enriched.length,
-    hasMore: skip + paginated.length < enriched.length,
+    jobs,
+    total,
+    hasMore: skip + jobs.length < total,
   };
 }
 
-module.exports = { getNearbyJobs, getOtherCityJobs, geocodeJobLocation };
+module.exports = { getNearbyJobs, getOtherCityJobs };
