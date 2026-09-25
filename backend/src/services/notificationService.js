@@ -3,6 +3,31 @@ const { initFirebaseAdmin } = require('../config/firebaseAdmin');
 const User = require('../models/User');
 const { mapType } = require('./notificationTypeMap');
 
+// ─────────────────────────────────────────────
+// ✅ Sanitize objects and prevent [object Object] leaks
+// ─────────────────────────────────────────────
+function safeString(val) {
+  if (!val) return '';
+  if (typeof val === 'string') {
+    if (val.includes('[object Object]')) return '';
+    return val;
+  }
+  if (typeof val === 'object') {
+    // Safely extract the most appropriate display field
+    return val.display || val.city || val.subLocation || val.name || '';
+  }
+  return String(val);
+}
+
+// ─────────────────────────────────────────────
+// ✅ Extract User's first name for personalization
+// ─────────────────────────────────────────────
+function getFirstName(fullName) {
+  const name = safeString(fullName).trim();
+  if (!name) return '';
+  return name.split(/\s+/)[0] || '';
+}
+
 /**
  * Sends FCM notifications to tokens with full Android compatibility.
  */
@@ -151,7 +176,8 @@ async function resolveTargetUsers(notificationDoc) {
       break;
   }
 
-  const users = await User.find(query).select('fcmTokens').lean();
+  // ✅ Fetch user name alongside fcmTokens for premium personalization
+  const users = await User.find(query).select('fcmTokens name').lean();
   return users;
 }
 
@@ -160,15 +186,8 @@ async function resolveTargetUsers(notificationDoc) {
  */
 async function pushForNotification(notificationDoc) {
   const users = await resolveTargetUsers(notificationDoc);
-  const tokens = [];
-  users.forEach((u) => {
-    u.fcmTokens?.forEach((t) => {
-      if (t.token) tokens.push(t.token);
-    });
-  });
-
-  if (!tokens.length) {
-    console.log('[FCM] ⚠️ No registered user tokens found for targeted audience:', notificationDoc.targetAudience);
+  if (!users.length) {
+    console.log('[FCM] ⚠️ No targeted users found with active tokens.');
     return {
       success: false,
       message: 'No registered user devices found for targeted audience',
@@ -177,24 +196,111 @@ async function pushForNotification(notificationDoc) {
     };
   }
 
+  // ── 1. PREPARE SANITIZED VALUES ──
+  const rawJobTitle = notificationDoc.data?.title || notificationDoc.data?.jobTitle || notificationDoc.title || '';
+  const rawCompany = notificationDoc.data?.companyName || notificationDoc.data?.company || '';
+  const rawLocation = notificationDoc.data?.location || notificationDoc.data?.city || notificationDoc.targetCity || '';
+  const rawSalary = notificationDoc.data?.salary || notificationDoc.data?.currentSalary || '';
+  const rawHrName = notificationDoc.data?.hrName || 'Ramesh';
+
+  const jobTitle = safeString(rawJobTitle) || 'Job Opening';
+  const company = safeString(rawCompany);
+  const location = safeString(rawLocation);
+  const salary = safeString(rawSalary);
+  const hrName = safeString(rawHrName);
+
+  // ── 2. PROCESS HIGH-SPEED INDIVIDUAL PERSONALIZATION ──
+  // For precise targets under 2,000 users, personalize with the user's actual first name.
+  // Falls back to high-volume multicast for broader audiences.
+  const isBulkSend = users.length > 2000;
   const mobileType = mapType(notificationDoc.type);
 
-  const dataPayload = {
+  const globalDataPayload = {
     type: mobileType,
     notificationId: String(notificationDoc._id),
-    title: String(notificationDoc.title || ''),
-    body: String(notificationDoc.body || ''),
+    title: jobTitle,
+    body: `${hrName} HR wants to confirm. Tap to Book your Slot.`,
     ...(notificationDoc.data || {}),
   };
 
+  if (!isBulkSend) {
+    let successCount = 0;
+    let failureCount = 0;
+    let invalidTokensRemoved = 0;
+
+    console.log(`[FCM] Sending personalized alerts to ${users.length} users...`);
+
+    for (const u of users) {
+      const firstName = getFirstName(u.name);
+      
+      // Personalized Indian style template
+      const personalizedTitle = firstName 
+        ? `${firstName}, interview slots closing! 🕒` 
+        : `Interview slots closing! 🕒`;
+
+      let personalizedBody = `${hrName} HR wants to confirm. Tap to Book your Slot. ${jobTitle}`;
+      if (company) personalizedBody += ` at ${company}`;
+      if (location) personalizedBody += `, ${location} me`;
+      if (salary) personalizedBody += `. Salary: ${salary}`;
+
+      const tokens = (u.fcmTokens || []).map(t => t.token).filter(Boolean);
+      if (!tokens.length) continue;
+
+      const res = await sendToTokens(
+        tokens,
+        {
+          title: personalizedTitle,
+          body: personalizedBody,
+          imageUrl: notificationDoc.imageUrl || '',
+        },
+        {
+          ...globalDataPayload,
+          title: personalizedTitle,
+          body: personalizedBody,
+        }
+      );
+
+      successCount += res.successCount || 0;
+      failureCount += res.failureCount || 0;
+      invalidTokensRemoved += res.invalidTokensRemoved || 0;
+    }
+
+    return {
+      success: successCount > 0,
+      successCount,
+      failureCount,
+      invalidTokensRemoved,
+    };
+  }
+
+  // ── 3. HIGH-SPEED BULK MULTICAST FALLBACK ──
+  console.log(`[FCM] Sending general bulk multicast alerts to ${users.length} recipients...`);
+  
+  const generalTitle = `Interview slots closing! 🕒`;
+  let generalBody = `${hrName} HR wants to confirm. Tap to Book your Slot. ${jobTitle}`;
+  if (company) generalBody += ` at ${company}`;
+  if (location) generalBody += `, ${location} me`;
+  if (salary) generalBody += `. Salary: ${salary}`;
+
+  const allTokens = [];
+  users.forEach((u) => {
+    u.fcmTokens?.forEach((t) => {
+      if (t.token) allTokens.push(t.token);
+    });
+  });
+
   return sendToTokens(
-    tokens,
+    allTokens,
     {
-      title: notificationDoc.title,
-      body: notificationDoc.body,
+      title: generalTitle,
+      body: generalBody,
       imageUrl: notificationDoc.imageUrl || '',
     },
-    dataPayload
+    {
+      ...globalDataPayload,
+      title: generalTitle,
+      body: generalBody,
+    }
   );
 }
 
