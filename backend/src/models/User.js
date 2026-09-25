@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { careerflowAdminDbConnection } = require('../config/db');
 
 // ── FCM Token Subschema ──
 const fcmTokenSchema = new mongoose.Schema(
@@ -127,4 +128,7 @@ userSchema.pre('save', function (next) {
   next();
 });
 
-module.exports = mongoose.model('User', userSchema);
+// ✅ CRITICAL: Bind User model to the careerflow_admin DB connection
+// This ensures ALL profile reads/writes go to the correct database
+// where the original user data is stored (users collection).
+module.exports = careerflowAdminDbConnection.model('User', userSchema);

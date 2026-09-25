@@ -39,6 +39,23 @@ applicationDbConnection.on("error", (err) => {
   console.error(`❌ application_db Connection Error: ${err.message}`);
 });
 
+// ─── QUATERNARY CONNECTION: careerflow_admin (Synchronous Instantiation) ───
+// ✅ This is where the ORIGINAL User profile data lives (users collection)
+// All User model reads/writes go here — auth, profile, FCM tokens, everything.
+const careerflowAdminDbConnection = mongoose.createConnection(mongoURI, {
+  dbName: "careerflow_admin",
+});
+
+careerflowAdminDbConnection.on("connected", () => {
+  console.log(
+    `✅ MongoDB Connected (Careerflow Admin DB — Users): ${careerflowAdminDbConnection.host}/${careerflowAdminDbConnection.name}`
+  );
+});
+
+careerflowAdminDbConnection.on("error", (err) => {
+  console.error(`❌ careerflow_admin Connection Error: ${err.message}`);
+});
+
 // ─── PRIMARY CONNECTION FUNCTION: careerflow_admin (or default) ───
 const connectDB = async () => {
   try {
@@ -53,3 +70,4 @@ const connectDB = async () => {
 module.exports = connectDB;
 module.exports.jobDbConnection = jobDbConnection;
 module.exports.applicationDbConnection = applicationDbConnection;
+module.exports.careerflowAdminDbConnection = careerflowAdminDbConnection;
