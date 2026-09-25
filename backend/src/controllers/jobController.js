@@ -6,7 +6,7 @@ const NEARBY_RADIUS_KM = 50;
 const MAX_LIMIT = 50;
 const DEFAULT_LIMIT = 20;
 
-// Instant local coordinates for distance math fallback
+// Instant fallback coordinate map
 const LOCAL_COORDS = {
   'pune': { lat: 18.5204, lon: 73.8567 },
   'talegaon dabhade': { lat: 18.7358, lon: 73.6756 },
@@ -187,7 +187,6 @@ exports.getJobById = async (req, res) => {
 
 // ─────────────────────────────────────────────
 // GET /api/v1/jobs/nearby
-// Resilient: Tries $geoNear -> Fallback to all live jobs + distance calculation
 // ─────────────────────────────────────────────
 exports.getNearbyJobs = async (req, res) => {
   try {
@@ -205,7 +204,7 @@ exports.getNearbyJobs = async (req, res) => {
     let jobs = [];
     let total = 0;
 
-    // 1. Try $geoNear aggregation first
+    // 1. Try $geoNear aggregation first (if 2dsphere index & coordinates exist)
     if (coords) {
       try {
         const pipeline = [
@@ -221,7 +220,16 @@ exports.getNearbyJobs = async (req, res) => {
           },
           {
             $facet: {
-              jobs: [{ $skip: skip }, { $limit: limit }],
+              jobs: [
+                { $skip: skip },
+                { $limit: limit },
+                {
+                  $project: {
+                    ...JOB_CARD_PROJECTION,
+                    distanceMeters: 1,
+                  },
+                },
+              ],
               totalCount: [{ $count: 'count' }],
             },
           },
@@ -231,22 +239,24 @@ exports.getNearbyJobs = async (req, res) => {
         jobs = result[0]?.jobs || [];
         total = result[0]?.totalCount?.[0]?.count || 0;
       } catch (geoErr) {
-        // Geospatial index not yet ready or geo fields missing — continue to fallback
+        // Fall back cleanly if 2dsphere index is still building
       }
     }
 
-    // 2. Fallback: If geo query returned 0 jobs, fetch live jobs from Job_db directly!
+    // 2. Fallback: Fetch jobs from Job_db directly using standard query
     if (jobs.length === 0) {
-      const allJobs = await Job.find(baseFilter, JOB_CARD_PROJECTION)
-        .sort({ postedAt: -1, createdAt: -1 })
-        .limit(100)
-        .lean();
+      const [allJobs, count] = await Promise.all([
+        Job.find(baseFilter, JOB_CARD_PROJECTION)
+          .sort({ postedAt: -1, createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .lean(),
+        Job.countDocuments(baseFilter),
+      ]);
 
-      total = allJobs.length;
-      const paged = allJobs.slice(skip, skip + limit);
-
-      jobs = paged.map((j) => {
-        let km = 3.5; // default fallback distance
+      total = count;
+      jobs = allJobs.map((j) => {
+        let km = 3.5;
         if (coords) {
           const jLat = j.location?.lat || (j.location?.city && LOCAL_COORDS[j.location.city.toLowerCase()]?.lat);
           const jLon = j.location?.lon || (j.location?.city && LOCAL_COORDS[j.location.city.toLowerCase()]?.lon);
@@ -261,7 +271,6 @@ exports.getNearbyJobs = async (req, res) => {
       });
     }
 
-    // Format distances cleanly for UI
     const transformed = jobs.map((j) => {
       const t = transformJobCard(j);
       if (j.distanceMeters != null) {
@@ -297,7 +306,6 @@ exports.getOtherCityJobs = async (req, res) => {
   try {
     const coords = parseCoords(req);
     const { page, limit, skip } = parsePagination(req);
-    const radiusKm = parseFloat(req.query.radius) || NEARBY_RADIUS_KM;
     const q = String(req.query.q || '').trim();
 
     const baseFilter = liveJobFilter();

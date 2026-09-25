@@ -28,7 +28,7 @@ const activeBannerFilter = (placement = 'home_hero') => {
   };
 };
 
-// ✅ Resilient live filter — matches any live/active job status
+// Resilient live filter — matches active jobs
 const liveJobFilter = () => {
   const now = new Date();
   return {
@@ -44,17 +44,13 @@ const liveJobFilter = () => {
   };
 };
 
+// ✅ Clean projection: NO nested path collisions
 const JOB_CARD_PROJECTION = {
   title: 1,
   companyName: 1,
   companyLogo: 1,
   companyInitials: 1,
   location: 1,
-  'location.address': 1,
-  'location.city': 1,
-  'location.state': 1,
-  'location.lat': 1,
-  'location.lon': 1,
   salary: 1,
   experience: 1,
   jobType: 1,
