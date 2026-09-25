@@ -171,9 +171,11 @@ exports.uploadAvatar = async (req, res) => {
 };
 
 
-// ─────────────────────────────────────────────────────────────
-// POST /api/profile/upload-resume (Updated to bypass ACL blocks)
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// POST /api/profile/upload-resume
+// ✅ Uses resource_type: 'raw' with explicit .pdf in public_id
+// ✅ Prevents Ghostscript 500 errors and 404 URL mismatch
+// ─────────────────────────────────────────────
 exports.uploadResume = async (req, res) => {
   try {
     let resumeUrl = '';
@@ -191,8 +193,8 @@ exports.uploadResume = async (req, res) => {
 
     // Cleanup old resume from Cloudinary
     if (user.resumePublicId) {
-      try { await cloudinary.uploader.destroy(user.resumePublicId, { resource_type: 'image' }); } catch (_) {}
       try { await cloudinary.uploader.destroy(user.resumePublicId, { resource_type: 'raw' }); } catch (_) {}
+      try { await cloudinary.uploader.destroy(user.resumePublicId, { resource_type: 'image' }); } catch (_) {}
       try { await cloudinary.uploader.destroy(user.resumePublicId, { resource_type: 'auto' }); } catch (_) {}
     }
 
@@ -202,30 +204,22 @@ exports.uploadResume = async (req, res) => {
       resumePublicId = req.file.filename || req.file.public_id;
     } else if (req.body.resume || req.body.file || req.body.base64) {
       const fileStr = req.body.resume || req.body.file || req.body.base64;
-      const publicId = `resume_${user._id}_${Date.now()}`;
+      
+      // ✅ FIX 1: Explicitly include .pdf in the public_id so Cloudinary serves the true filename
+      const publicId = `resume_${user._id}_${Date.now()}.pdf`;
 
-      // ✅ FIX: Use resource_type: 'image' instead of 'raw'.
-      // This bypasses Cloudinary's raw security ACL block and allows public PDF delivery.
+      // ✅ FIX 2: Use resource_type: 'raw' so Cloudinary stores the authentic PDF without image rastering
       const uploadRes = await cloudinary.uploader.upload(fileStr, {
         folder: 'careerflow/resumes',
-        resource_type: 'image', // changed from 'raw'
+        resource_type: 'raw',
         type: 'upload',
         access_mode: 'public',
         public_id: publicId,
         overwrite: true,
-        format: 'pdf',
       });
 
+      // ✅ FIX 3: Use Cloudinary's exact returned secure_url directly
       resumeUrl = uploadRes.secure_url;
-      if (!resumeUrl.toLowerCase().endsWith('.pdf')) {
-        resumeUrl = `${resumeUrl}.pdf`;
-      }
-      
-      // Remove any attachment flags so it opens cleanly inline in browsers
-      resumeUrl = resumeUrl
-        .replace(/\/fl_attachment:[^/]+\//g, '/')
-        .replace(/\/fl_attachment\//g, '/');
-
       resumePublicId = uploadRes.public_id;
     } else {
       return res.status(400).json({
@@ -240,6 +234,8 @@ exports.uploadResume = async (req, res) => {
     user.resumePublicId = resumePublicId;
     await user.save();
 
+    console.log(`[ResumeUpload] ✅ Saved resume for ${user._id}: ${resumeUrl}`);
+
     res.status(200).json({
       success: true,
       message: 'Resume uploaded successfully',
@@ -253,7 +249,7 @@ exports.uploadResume = async (req, res) => {
     console.error('[profile.uploadResume] error:', error);
     res.status(500).json({
       success: false,
-      message: error.message,
+      message: error.message || 'Resume upload failed',
       code: 'RESUME_UPLOAD_ERROR',
       requestId: req.id,
     });
