@@ -4,43 +4,26 @@ const cloudinary = require('../config/cloudinary');
 const uniq = (arr) =>
   Array.isArray(arr) ? [...new Set(arr.filter(Boolean).map(String))] : [];
 
-// ─────────────────────────────────────────────
-// PROFILE PROJECTION — only fields the mobile app needs
-// ─────────────────────────────────────────────
 const PROFILE_PROJECTION = {
   __v: 0,
   fcmTokens: 0,
 };
 
 // ─────────────────────────────────────────────
-// ✅ Generates a Cryptographically Signed URL 
-// to bypass Cloudinary's raw PDF delivery restrictions
+// Helper to construct backend base URL dynamically
 // ─────────────────────────────────────────────
-function generateSecureResumeUrl(user) {
-  if (!user || !user.resumeUrl) return '';
+function getBackendBaseUrl(req) {
+  if (process.env.BACKEND_URL) return process.env.BACKEND_URL.replace(/\/+$/, '');
+  if (process.env.API_URL) return process.env.API_URL.replace(/\/api\/?$/, '').replace(/\/+$/, '');
+  const host = req ? req.get('host') : 'smilejobs-application-backend.onrender.com';
+  const protocol = req && (req.protocol === 'https' || req.get('x-forwarded-proto') === 'https') ? 'https' : 'https';
+  return `${protocol}://${host}`;
+}
 
-  // Fallback: If it's an old broken image URL, clean it up first
-  let targetPublicId = user.resumePublicId;
-  if (!targetPublicId) {
-    let url = user.resumeUrl;
-    if (url.includes('/image/upload/') && url.toLowerCase().endsWith('.pdf')) {
-      url = url.replace('/image/upload/', '/raw/upload/');
-    }
-    return url;
-  }
-
-  try {
-    // Generate secure signed URL using backend api_secret
-    return cloudinary.url(targetPublicId, {
-      resource_type: 'raw',
-      type: 'upload',
-      sign_url: true, // Appends security signature to bypass ACL checks
-      secure: true,
-    });
-  } catch (err) {
-    console.error('[profileController.generateSecureResumeUrl] Error:', err.message);
-    return user.resumeUrl;
-  }
+function getResumeProxyUrl(user, req) {
+  if (!user || (!user.resumeUrl && !user.resumePublicId)) return '';
+  const baseUrl = getBackendBaseUrl(req);
+  return `${baseUrl}/api/profile/resume/view/${user._id || user.id}`;
 }
 
 // ─────────────────────────────────────────────
@@ -57,14 +40,15 @@ exports.getMyProfile = async (req, res) => {
       });
     }
 
-    // Normalize arrays
     user.skills = uniq(user.skills);
     user.knownLanguages = uniq(user.knownLanguages);
     user.assets = uniq(user.assets);
     user.certifications = uniq(user.certifications);
 
-    // ✅ Secure & sign the resume URL
-    user.resumeUrl = generateSecureResumeUrl(user);
+    // Provide reliable backend proxy URL for resume viewing
+    if (user.resumeUrl || user.resumePublicId) {
+      user.resumeUrl = getResumeProxyUrl(user, req);
+    }
 
     res.set('Cache-Control', 'private, max-age=30');
     res.status(200).json({ success: true, data: user });
@@ -125,8 +109,9 @@ exports.updateMyProfile = async (req, res) => {
     data.assets = uniq(data.assets);
     data.certifications = uniq(data.certifications);
 
-    // ✅ Secure & sign the resume URL
-    data.resumeUrl = generateSecureResumeUrl(data);
+    if (data.resumeUrl || data.resumePublicId) {
+      data.resumeUrl = getResumeProxyUrl(data, req);
+    }
 
     res.status(200).json({ success: true, message: 'Profile saved', data });
   } catch (error) {
@@ -141,7 +126,7 @@ exports.updateMyProfile = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────
-// POST /api/profile/upload-avatar (UNCHANGED)
+// POST /api/profile/upload-avatar
 // ─────────────────────────────────────────────
 exports.uploadAvatar = async (req, res) => {
   try {
@@ -201,7 +186,7 @@ exports.uploadAvatar = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────
-// POST /api/profile/upload-resume (UPDATED)
+// POST /api/profile/upload-resume
 // ─────────────────────────────────────────────
 exports.uploadResume = async (req, res) => {
   try {
@@ -231,7 +216,7 @@ exports.uploadResume = async (req, res) => {
       resumePublicId = req.file.filename || req.file.public_id;
     } else if (req.body.resume || req.body.file || req.body.base64) {
       const fileStr = req.body.resume || req.body.file || req.body.base64;
-      const publicId = `resume_${user._id}_${Date.now()}.pdf`;
+      const publicId = `resume_${user._id}_${Date.now()}`;
 
       const uploadRes = await cloudinary.uploader.upload(fileStr, {
         folder: 'careerflow/resumes',
@@ -259,14 +244,13 @@ exports.uploadResume = async (req, res) => {
 
     console.log(`[ResumeUpload] ✅ Saved resume for ${user._id}: ${resumeUrl}`);
 
-    // Return the secure, signed URL directly to the client
-    const signedResumeUrl = generateSecureResumeUrl(user);
+    const proxyViewUrl = getResumeProxyUrl(user, req);
 
     res.status(200).json({
       success: true,
       message: 'Resume uploaded successfully',
       data: {
-        resumeUrl: signedResumeUrl,
+        resumeUrl: proxyViewUrl,
         resumeFileName: user.resumeFileName,
         profileCompletion: user.profileCompletion,
       },
@@ -283,7 +267,159 @@ exports.uploadResume = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────
-// GET /api/profile/all (UNCHANGED)
+// GET /api/profile/resume/view/:userId?
+// ✅ Direct PDF stream to client (Bypasses all Cloudinary ACL restrictions)
+// ─────────────────────────────────────────────
+exports.viewResume = async (req, res) => {
+  try {
+    const userId = req.params.userId || req.user?.id;
+    if (!userId) {
+      return res.status(400).json({ success: false, message: 'User ID is required' });
+    }
+
+    const user = await User.findById(userId).select('resumeUrl resumeFileName resumePublicId');
+    if (!user || (!user.resumeUrl && !user.resumePublicId)) {
+      return res.status(404).json({ success: false, message: 'Resume not found' });
+    }
+
+    const candidateUrls = [];
+
+    // 1. Authenticated private download URL
+    if (user.resumePublicId) {
+      try {
+        const privateUrl = cloudinary.utils.private_download_url(user.resumePublicId, '', {
+          resource_type: 'raw',
+          type: 'upload',
+          expires_at: Math.floor(Date.now() / 1000) + 7200,
+        });
+        if (privateUrl) candidateUrls.push(privateUrl);
+      } catch (_) {}
+
+      try {
+        const signedUrl = cloudinary.url(user.resumePublicId, {
+          resource_type: 'raw',
+          type: 'upload',
+          sign_url: true,
+          secure: true,
+        });
+        if (signedUrl && !candidateUrls.includes(signedUrl)) candidateUrls.push(signedUrl);
+      } catch (_) {}
+    }
+
+    // 2. Database stored URL
+    if (user.resumeUrl) {
+      candidateUrls.push(user.resumeUrl);
+      if (user.resumeUrl.includes('/image/upload/')) {
+        candidateUrls.push(user.resumeUrl.replace('/image/upload/', '/raw/upload/'));
+      }
+    }
+
+    let pdfBuffer = null;
+    let fetchedSuccessfully = false;
+
+    for (const url of candidateUrls) {
+      try {
+        const fetchRes = await fetch(url);
+        if (fetchRes.ok) {
+          const ab = await fetchRes.arrayBuffer();
+          pdfBuffer = Buffer.from(ab);
+          if (pdfBuffer.slice(0, 4).toString() === '%PDF' || pdfBuffer.length > 100) {
+            fetchedSuccessfully = true;
+            break;
+          }
+        }
+      } catch (e) {
+        console.warn(`[viewResume] Failed fetching candidate URL: ${url}`, e.message);
+      }
+    }
+
+    if (!fetchedSuccessfully || !pdfBuffer) {
+      return res.status(404).json({
+        success: false,
+        message: 'Unable to retrieve resume PDF from storage.',
+        code: 'RESUME_FETCH_FAILED',
+      });
+    }
+
+    const fileName = (user.resumeFileName || 'Resume.pdf').replace(/[^a-zA-Z0-9._-]/g, '_');
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${fileName}"`);
+    res.setHeader('Content-Length', pdfBuffer.length);
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+
+    return res.status(200).send(pdfBuffer);
+  } catch (error) {
+    console.error('[profile.viewResume] error:', error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        message: error.message || 'Error streaming resume',
+        code: 'RESUME_VIEW_ERROR',
+      });
+    }
+  }
+};
+
+// ─────────────────────────────────────────────
+// GET /api/profile/resume/download/:userId?
+// ─────────────────────────────────────────────
+exports.downloadResume = async (req, res) => {
+  try {
+    const userId = req.params.userId || req.user?.id;
+    if (!userId) {
+      return res.status(400).json({ success: false, message: 'User ID is required' });
+    }
+
+    const user = await User.findById(userId).select('resumeUrl resumeFileName resumePublicId');
+    if (!user || (!user.resumeUrl && !user.resumePublicId)) {
+      return res.status(404).json({ success: false, message: 'Resume not found' });
+    }
+
+    const candidateUrls = [];
+    if (user.resumePublicId) {
+      try {
+        const privateUrl = cloudinary.utils.private_download_url(user.resumePublicId, '', {
+          resource_type: 'raw',
+          type: 'upload',
+          expires_at: Math.floor(Date.now() / 1000) + 7200,
+        });
+        if (privateUrl) candidateUrls.push(privateUrl);
+      } catch (_) {}
+    }
+    if (user.resumeUrl) {
+      candidateUrls.push(user.resumeUrl);
+    }
+
+    let pdfBuffer = null;
+    for (const url of candidateUrls) {
+      try {
+        const fetchRes = await fetch(url);
+        if (fetchRes.ok) {
+          const ab = await fetchRes.arrayBuffer();
+          pdfBuffer = Buffer.from(ab);
+          break;
+        }
+      } catch (_) {}
+    }
+
+    if (!pdfBuffer) {
+      return res.status(404).json({ success: false, message: 'Resume file not found' });
+    }
+
+    const fileName = (user.resumeFileName || 'Resume.pdf').replace(/[^a-zA-Z0-9._-]/g, '_');
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.setHeader('Content-Length', pdfBuffer.length);
+
+    return res.status(200).send(pdfBuffer);
+  } catch (error) {
+    console.error('[profile.downloadResume] error:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ─────────────────────────────────────────────
+// GET /api/profile/all (recruiter-facing list)
 // ─────────────────────────────────────────────
 exports.getAllProfiles = async (req, res) => {
   try {
@@ -316,10 +452,9 @@ exports.getAllProfiles = async (req, res) => {
       User.countDocuments(filter),
     ]);
 
-    // Apply signed URLs to all returned Light-weight Profile Cards
     const enrichedUsers = users.map(u => ({
       ...u,
-      resumeUrl: generateSecureResumeUrl(u),
+      resumeUrl: getResumeProxyUrl(u, req),
     }));
 
     res.status(200).json({
