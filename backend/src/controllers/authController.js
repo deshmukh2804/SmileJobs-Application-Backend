@@ -77,7 +77,8 @@ exports.verifyOTP = async (req, res) => {
       return res.status(401).json({ success: false, message: otpResult.message });
     }
 
-    let user = await User.findOne({ phoneNumber });
+    // Find the MOST RECENT user with this phone (in case of duplicates)
+    let user = await User.findOne({ phoneNumber }).sort({ updatedAt: -1 });
     let isNewUser = false;
 
     if (!user) {
@@ -88,13 +89,15 @@ exports.verifyOTP = async (req, res) => {
         role: 'job_seeker',
       });
       isNewUser = true;
+      console.log(`[Auth] ✅ New user created for ${phoneNumber} -> ${user._id}`);
     } else {
       user.isVerified = true;
       user.lastLogin = new Date();
       await user.save();
+      console.log(`[Auth] ✅ Existing user login for ${phoneNumber} -> ${user._id}`);
     }
 
-    // Generate JWT token safely
+    // Generate fresh JWT with correct user ID
     const token = generateAuthToken(user);
 
     return res.status(200).json({
@@ -106,6 +109,8 @@ exports.verifyOTP = async (req, res) => {
         id: user._id,
         phoneNumber: user.phoneNumber,
         name: user.name || '',
+        email: user.email || '',
+        avatarUrl: user.avatarUrl || '',
         role: user.role,
       },
     });

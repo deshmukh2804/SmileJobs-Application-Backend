@@ -4,19 +4,60 @@ const cloudinary = require('../config/cloudinary');
 const uniq = (arr) =>
   Array.isArray(arr) ? [...new Set(arr.filter(Boolean).map(String))] : [];
 
+/**
+ * Smart user lookup — tries by ID first, then falls back to phoneNumber/email from JWT
+ * This handles cases where old JWTs point to stale user IDs
+ */
+const findUserSmart = async (req) => {
+  const { id, phoneNumber, email } = req.user || {};
+
+  // 1. Try by _id
+  if (id) {
+    const user = await User.findById(id);
+    if (user) return user;
+    console.log(`[Profile] ⚠️ User ID ${id} not found in DB, trying phone/email fallback...`);
+  }
+
+  // 2. Fallback: by phoneNumber from JWT
+  if (phoneNumber) {
+    const user = await User.findOne({ phoneNumber });
+    if (user) {
+      console.log(`[Profile] ✅ Fallback: Found user by phone ${phoneNumber} -> ${user._id}`);
+      return user;
+    }
+  }
+
+  // 3. Fallback: by email
+  if (email) {
+    const user = await User.findOne({ email });
+    if (user) {
+      console.log(`[Profile] ✅ Fallback: Found user by email ${email} -> ${user._id}`);
+      return user;
+    }
+  }
+
+  return null;
+};
+
 exports.getMyProfile = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select('-__v');
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    console.log(`[Profile] getMyProfile called for JWT user:`, req.user);
+    const user = await findUserSmart(req);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
 
     const data = user.toObject();
+    delete data.__v;
     data.skills = uniq(data.skills);
     data.knownLanguages = uniq(data.knownLanguages);
     data.assets = uniq(data.assets);
     data.certifications = uniq(data.certifications);
 
+    console.log(`[Profile] ✅ Returning profile for ${user.phoneNumber || user.email} (${user._id})`);
     res.status(200).json({ success: true, data });
   } catch (error) {
+    console.error('[Profile] getMyProfile error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -32,8 +73,11 @@ exports.updateMyProfile = async (req, res) => {
       'specialization', 'certifications', 'isVisibleToRecruiters',
     ];
 
-    const user = await User.findById(req.user.id);
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    console.log(`[Profile] updateMyProfile called for JWT user:`, req.user);
+    const user = await findUserSmart(req);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
 
     allowed.forEach((key) => {
       if (req.body[key] === undefined) return;
@@ -51,13 +95,16 @@ exports.updateMyProfile = async (req, res) => {
     await user.save();
 
     const data = user.toObject();
+    delete data.__v;
     data.skills = uniq(data.skills);
     data.knownLanguages = uniq(data.knownLanguages);
     data.assets = uniq(data.assets);
     data.certifications = uniq(data.certifications);
 
+    console.log(`[Profile] ✅ Profile saved for ${user.phoneNumber || user.email}`);
     res.status(200).json({ success: true, message: 'Profile saved', data });
   } catch (error) {
+    console.error('[Profile] updateMyProfile error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -84,7 +131,7 @@ exports.uploadAvatar = async (req, res) => {
       return res.status(400).json({ success: false, message: 'No image provided' });
     }
 
-    const user = await User.findById(req.user.id);
+    const user = await findUserSmart(req);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
     user.avatarUrl = avatarUrl;
@@ -111,8 +158,6 @@ exports.uploadAvatar = async (req, res) => {
  * - Upload PDF as resource_type: 'raw' → most reliable public link
  * - access_mode: 'public'
  * - Final URL works in browser, mobile, admin panel
- * Example:
- * https://res.cloudinary.com/xxxxx/raw/upload/v123/careerflow/resumes/resume_xxx.pdf
  */
 exports.uploadResume = async (req, res) => {
   try {
@@ -120,53 +165,38 @@ exports.uploadResume = async (req, res) => {
     let resumeFileName = req.body.fileName || 'Resume.pdf';
     let resumePublicId = '';
 
-    const user = await User.findById(req.user.id);
+    const user = await findUserSmart(req);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-    // Delete old resume (try both raw + image in case previous uploads used image)
+    // Delete old resume
     if (user.resumePublicId) {
-      try {
-        await cloudinary.uploader.destroy(user.resumePublicId, { resource_type: 'raw' });
-      } catch (_) {}
-      try {
-        await cloudinary.uploader.destroy(user.resumePublicId, { resource_type: 'image' });
-      } catch (_) {}
-      try {
-        await cloudinary.uploader.destroy(user.resumePublicId, { resource_type: 'auto' });
-      } catch (_) {}
+      try { await cloudinary.uploader.destroy(user.resumePublicId, { resource_type: 'raw' }); } catch (_) {}
+      try { await cloudinary.uploader.destroy(user.resumePublicId, { resource_type: 'image' }); } catch (_) {}
+      try { await cloudinary.uploader.destroy(user.resumePublicId, { resource_type: 'auto' }); } catch (_) {}
     }
 
     if (req.file) {
-      // Multer + CloudinaryStorage path
       resumeUrl = req.file.path || req.file.secure_url;
       resumeFileName = req.file.originalname || resumeFileName;
       resumePublicId = req.file.filename || req.file.public_id;
     } else if (req.body.resume || req.body.file || req.body.base64) {
       const fileStr = req.body.resume || req.body.file || req.body.base64;
-
-      // Keep clean public_id WITHOUT extension for raw (Cloudinary adds it)
       const publicId = `resume_${user._id}_${Date.now()}`;
 
       const uploadRes = await cloudinary.uploader.upload(fileStr, {
         folder: 'careerflow/resumes',
-        resource_type: 'raw',       // ✅ BEST for public PDF
+        resource_type: 'raw',
         type: 'upload',
-        access_mode: 'public',      // ✅ public link
+        access_mode: 'public',
         public_id: publicId,
         overwrite: true,
-        format: 'pdf',              // force pdf
+        format: 'pdf',
       });
 
-      // Public URL that opens everywhere
-      // e.g. https://res.cloudinary.com/xxx/raw/upload/v123/careerflow/resumes/resume_xxx.pdf
       resumeUrl = uploadRes.secure_url;
-
-      // Ensure .pdf at end (some raw URLs omit it)
       if (!resumeUrl.toLowerCase().endsWith('.pdf')) {
         resumeUrl = `${resumeUrl}.pdf`;
       }
-
-      // Strip any forced-download flags if present
       resumeUrl = resumeUrl
         .replace(/\/fl_attachment:[^/]+\//g, '/')
         .replace(/\/fl_attachment\//g, '/');
