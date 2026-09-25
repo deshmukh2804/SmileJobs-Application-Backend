@@ -1,12 +1,9 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'careerflow_super_secret_key';
+// ✅ Aligned precisely with the controller signature keys!
+const JWT_SECRET = process.env.JWT_SECRET || 'careerflow_production_jwt_secret_key_default';
 
-/**
- * Express HTTP Authentication Middleware
- * Supports Bearer token, x-auth-token header, or query token
- */
 const authMiddleware = async (req, res, next) => {
   try {
     let token = null;
@@ -28,9 +25,12 @@ const authMiddleware = async (req, res, next) => {
       });
     }
 
+    // Un-quote tokens wrapped with quotes to prevent invalid signatures
+    const parsedToken = token.replace(/^"|"$/g, '').trim();
+
     let decoded;
     try {
-      decoded = jwt.verify(token, JWT_SECRET);
+      decoded = jwt.verify(parsedToken, JWT_SECRET);
     } catch (err) {
       if (err.name === 'TokenExpiredError') {
         return res.status(401).json({
@@ -55,7 +55,6 @@ const authMiddleware = async (req, res, next) => {
       });
     }
 
-    // Fast indexed DB lookup — only fetch minimal required fields
     const user = await User.findById(userId).select('_id role isVerified phoneNumber email name').lean();
     if (!user) {
       return res.status(401).json({
@@ -65,7 +64,6 @@ const authMiddleware = async (req, res, next) => {
       });
     }
 
-    // Attach user profile to request context
     req.user = {
       id: String(user._id),
       _id: user._id,
@@ -87,9 +85,6 @@ const authMiddleware = async (req, res, next) => {
   }
 };
 
-/**
- * Optional Auth Middleware — attaches user if token is present, does not block if absent
- */
 const optionalAuth = async (req, res, next) => {
   const authHeader = req.headers.authorization || req.headers.Authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -98,9 +93,6 @@ const optionalAuth = async (req, res, next) => {
   return authMiddleware(req, res, next);
 };
 
-/**
- * Admin-only Middleware
- */
 const adminOnly = (req, res, next) => {
   if (!req.user || req.user.role !== 'admin') {
     return res.status(403).json({
@@ -112,9 +104,6 @@ const adminOnly = (req, res, next) => {
   next();
 };
 
-/**
- * Socket.IO Handshake Authentication Middleware
- */
 const socketAuthMiddleware = async (socket, next) => {
   try {
     const token =
@@ -126,9 +115,11 @@ const socketAuthMiddleware = async (socket, next) => {
       return next(new Error('Authentication token required'));
     }
 
+    const parsedToken = token.replace(/^"|"$/g, '').trim();
+
     let decoded;
     try {
-      decoded = jwt.verify(token, JWT_SECRET);
+      decoded = jwt.verify(parsedToken, JWT_SECRET);
     } catch (err) {
       return next(new Error('Session invalid or expired'));
     }
@@ -148,12 +139,6 @@ const socketAuthMiddleware = async (socket, next) => {
   }
 };
 
-// ✅ Attach all common alias names directly to the function to support all import patterns:
-// 1. const authMiddleware = require('./authMiddleware')
-// 2. const { protect } = require('./authMiddleware')
-// 3. const { verifyToken } = require('./authMiddleware')
-// 4. const { authenticate } = require('./authMiddleware')
-// 5. const { requireAuth } = require('./authMiddleware')
 authMiddleware.authMiddleware = authMiddleware;
 authMiddleware.protect = authMiddleware;
 authMiddleware.verifyToken = authMiddleware;

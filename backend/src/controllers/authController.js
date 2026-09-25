@@ -57,7 +57,6 @@ exports.sendOTP = async (req, res) => {
 
 // ─────────────────────────────────
 // ✅ POST /api/auth/verify-otp
-// Production-safe: handles duplicate users automatically
 // ─────────────────────────────────
 exports.verifyOTP = async (req, res) => {
   try {
@@ -75,7 +74,6 @@ exports.verifyOTP = async (req, res) => {
       return res.status(401).json({ success: false, message: otpResult.message });
     }
 
-    // ── Find ALL users with this phone (handles duplicates) ──
     const allUsers = await User.find({ phoneNumber })
       .sort({ profileCompletion: -1, updatedAt: -1 });
 
@@ -83,7 +81,6 @@ exports.verifyOTP = async (req, res) => {
     let isNewUser = false;
 
     if (allUsers.length === 0) {
-      // New user
       user = await User.create({
         phoneNumber,
         isVerified: true,
@@ -93,7 +90,6 @@ exports.verifyOTP = async (req, res) => {
       isNewUser = true;
       console.log(`[Auth] ✅ NEW user: ${phoneNumber} → ${user._id}`);
     } else {
-      // Pick the user with most complete profile
       user = allUsers[0];
       user.isVerified = true;
       user.lastLogin = new Date();
@@ -102,7 +98,6 @@ exports.verifyOTP = async (req, res) => {
         `[Auth] ✅ LOGIN: ${phoneNumber} → ${user._id} (${user.profileCompletion || 0}%)`
       );
 
-      // Clean up duplicates in background (don't wait)
       if (allUsers.length > 1) {
         const dupIds = allUsers.slice(1).map((u) => u._id);
         User.deleteMany({ _id: { $in: dupIds } })
@@ -133,6 +128,7 @@ exports.verifyOTP = async (req, res) => {
     return res.status(500).json({ success: false, message: 'Login temporarily failed. Try again.' });
   }
 };
+
 // ─────────────────────────────────
 // 🔵 POST /api/auth/google
 // ─────────────────────────────────
