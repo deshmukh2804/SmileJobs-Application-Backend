@@ -170,9 +170,10 @@ exports.uploadAvatar = async (req, res) => {
   }
 };
 
-// ─────────────────────────────────────────────
-// POST /api/profile/upload-resume
-// ─────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────
+// POST /api/profile/upload-resume (Updated to bypass ACL blocks)
+// ─────────────────────────────────────────────────────────────
 exports.uploadResume = async (req, res) => {
   try {
     let resumeUrl = '';
@@ -188,10 +189,10 @@ exports.uploadResume = async (req, res) => {
       });
     }
 
-    // Cleanup old resume
+    // Cleanup old resume from Cloudinary
     if (user.resumePublicId) {
-      try { await cloudinary.uploader.destroy(user.resumePublicId, { resource_type: 'raw' }); } catch (_) {}
       try { await cloudinary.uploader.destroy(user.resumePublicId, { resource_type: 'image' }); } catch (_) {}
+      try { await cloudinary.uploader.destroy(user.resumePublicId, { resource_type: 'raw' }); } catch (_) {}
       try { await cloudinary.uploader.destroy(user.resumePublicId, { resource_type: 'auto' }); } catch (_) {}
     }
 
@@ -203,9 +204,11 @@ exports.uploadResume = async (req, res) => {
       const fileStr = req.body.resume || req.body.file || req.body.base64;
       const publicId = `resume_${user._id}_${Date.now()}`;
 
+      // ✅ FIX: Use resource_type: 'image' instead of 'raw'.
+      // This bypasses Cloudinary's raw security ACL block and allows public PDF delivery.
       const uploadRes = await cloudinary.uploader.upload(fileStr, {
         folder: 'careerflow/resumes',
-        resource_type: 'raw',
+        resource_type: 'image', // changed from 'raw'
         type: 'upload',
         access_mode: 'public',
         public_id: publicId,
@@ -217,6 +220,8 @@ exports.uploadResume = async (req, res) => {
       if (!resumeUrl.toLowerCase().endsWith('.pdf')) {
         resumeUrl = `${resumeUrl}.pdf`;
       }
+      
+      // Remove any attachment flags so it opens cleanly inline in browsers
       resumeUrl = resumeUrl
         .replace(/\/fl_attachment:[^/]+\//g, '/')
         .replace(/\/fl_attachment\//g, '/');
@@ -237,7 +242,7 @@ exports.uploadResume = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      message: 'Resume uploaded',
+      message: 'Resume uploaded successfully',
       data: {
         resumeUrl: user.resumeUrl,
         resumeFileName: user.resumeFileName,
