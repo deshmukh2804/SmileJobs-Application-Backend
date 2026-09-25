@@ -183,6 +183,7 @@ async function resolveTargetUsers(notificationDoc) {
 
 /**
  * Dispatches push notification directly from a MongoDB Notification doc.
+ * Formats alerts similarly to premium Indian job portals.
  */
 async function pushForNotification(notificationDoc) {
   const users = await resolveTargetUsers(notificationDoc);
@@ -196,30 +197,39 @@ async function pushForNotification(notificationDoc) {
     };
   }
 
-  // ── 1. PREPARE SANITIZED VALUES ──
+  // ── 1. DYNAMIC VALUE PARSING (No Hardcoding) ──
   const rawJobTitle = notificationDoc.data?.title || notificationDoc.data?.jobTitle || notificationDoc.title || '';
   const rawCompany = notificationDoc.data?.companyName || notificationDoc.data?.company || '';
   const rawLocation = notificationDoc.data?.location || notificationDoc.data?.city || notificationDoc.targetCity || '';
   const rawSalary = notificationDoc.data?.salary || notificationDoc.data?.currentSalary || '';
-  const rawHrName = notificationDoc.data?.hrName || 'Ramesh';
+  
+  // Resolve HR name dynamically from payload or sender admin details
+  const rawHrName = notificationDoc.data?.hrName || notificationDoc.data?.recruiterName || notificationDoc.sentBy?.adminName || '';
+  const hrName = safeString(rawHrName).trim();
+
+  // Resolve work/job types dynamically (Full Time, Part Time, Internship)
+  const rawJobType = notificationDoc.data?.workType || notificationDoc.data?.jobType || notificationDoc.data?.type || '';
+  const jobType = safeString(rawJobType).trim();
 
   const jobTitle = safeString(rawJobTitle) || 'Job Opening';
   const company = safeString(rawCompany);
   const location = safeString(rawLocation);
   const salary = safeString(rawSalary);
-  const hrName = safeString(rawHrName);
 
   // ── 2. PROCESS HIGH-SPEED INDIVIDUAL PERSONALIZATION ──
-  // For precise targets under 2,000 users, personalize with the user's actual first name.
-  // Falls back to high-volume multicast for broader audiences.
   const isBulkSend = users.length > 2000;
   const mobileType = mapType(notificationDoc.type);
+
+  // Fallback to generic introductory statements if no specific HR name is specified
+  const introStatement = hrName 
+    ? `${hrName} HR wants to confirm.` 
+    : 'Hiring Manager wants to confirm.';
 
   const globalDataPayload = {
     type: mobileType,
     notificationId: String(notificationDoc._id),
     title: jobTitle,
-    body: `${hrName} HR wants to confirm. Tap to Book your Slot.`,
+    body: `${introStatement} Tap to Book your Slot.`,
     ...(notificationDoc.data || {}),
   };
 
@@ -238,7 +248,10 @@ async function pushForNotification(notificationDoc) {
         ? `${firstName}, interview slots closing! 🕒` 
         : `Interview slots closing! 🕒`;
 
-      let personalizedBody = `${hrName} HR wants to confirm. Tap to Book your Slot. ${jobTitle}`;
+      let jobSuffix = jobTitle;
+      if (jobType) jobSuffix += ` (${jobType})`;
+
+      let personalizedBody = `${introStatement} Tap to Book your Slot. ${jobSuffix}`;
       if (company) personalizedBody += ` at ${company}`;
       if (location) personalizedBody += `, ${location} me`;
       if (salary) personalizedBody += `. Salary: ${salary}`;
@@ -273,11 +286,14 @@ async function pushForNotification(notificationDoc) {
     };
   }
 
-  // ── 3. HIGH-SPEED BULK MULTICAST FALLBACK ──
+  // ── 3. HIGH-SPEED BULK MULTICAST FALLBACK (For large target groups) ──
   console.log(`[FCM] Sending general bulk multicast alerts to ${users.length} recipients...`);
   
   const generalTitle = `Interview slots closing! 🕒`;
-  let generalBody = `${hrName} HR wants to confirm. Tap to Book your Slot. ${jobTitle}`;
+  let jobSuffixBulk = jobTitle;
+  if (jobType) jobSuffixBulk += ` (${jobType})`;
+
+  let generalBody = `${introStatement} Tap to Book your Slot. ${jobSuffixBulk}`;
   if (company) generalBody += ` at ${company}`;
   if (location) generalBody += `, ${location} me`;
   if (salary) generalBody += `. Salary: ${salary}`;
