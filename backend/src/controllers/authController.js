@@ -3,17 +3,14 @@ const { OAuth2Client } = require('google-auth-library');
 const User = require('../models/User');
 const { generateOTP, verifyOTP, getDebugOTP } = require('../services/otpService');
 
-// Web Client ID fallback to prevent audience mismatch errors
 const GOOGLE_CLIENT_ID =
   process.env.GOOGLE_CLIENT_ID ||
   '220136080079-jgj4u2up1ntj3ovg29f806rg3sl7c9vf.apps.googleusercontent.com';
 
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
-// ── Centralized Safe JWT Signer ──
 const generateAuthToken = (user) => {
   const secret = process.env.JWT_SECRET || 'careerflow_production_jwt_secret_key_default';
-  // Handles JWT_EXPIRES_IN, JWT_EXPIRE or safely defaults to '30d'
   const expiresIn = process.env.JWT_EXPIRES_IN || process.env.JWT_EXPIRE || '30d';
 
   return jwt.sign(
@@ -60,6 +57,8 @@ exports.sendOTP = async (req, res) => {
 
 // ─────────────────────────────────
 // ✅ POST /api/auth/verify-otp
+// CRITICAL FIX: Deduplicates users with same phone number
+// Always returns the user with the MOST complete profile
 // ─────────────────────────────────
 exports.verifyOTP = async (req, res) => {
   try {
@@ -77,11 +76,17 @@ exports.verifyOTP = async (req, res) => {
       return res.status(401).json({ success: false, message: otpResult.message });
     }
 
-    // Find the MOST RECENT user with this phone (in case of duplicates)
-    let user = await User.findOne({ phoneNumber }).sort({ updatedAt: -1 });
+    // ── CRITICAL: Find ALL users with this phone number ──
+    const allUsers = await User.find({ phoneNumber }).sort({
+      profileCompletion: -1,
+      updatedAt: -1,
+    });
+
+    let user = null;
     let isNewUser = false;
 
-    if (!user) {
+    if (allUsers.length === 0) {
+      // No user exists — create new
       user = await User.create({
         phoneNumber,
         isVerified: true,
@@ -89,15 +94,28 @@ exports.verifyOTP = async (req, res) => {
         role: 'job_seeker',
       });
       isNewUser = true;
-      console.log(`[Auth] ✅ New user created for ${phoneNumber} -> ${user._id}`);
+      console.log(`[Auth] ✅ New user created: ${phoneNumber} → ${user._id}`);
     } else {
+      // Pick the user with the MOST complete profile (first in sorted list)
+      user = allUsers[0];
       user.isVerified = true;
       user.lastLogin = new Date();
       await user.save();
-      console.log(`[Auth] ✅ Existing user login for ${phoneNumber} -> ${user._id}`);
+
+      console.log(
+        `[Auth] ✅ Login: ${phoneNumber} → ${user._id} (profile: ${user.profileCompletion || 0}%)`
+      );
+
+      // ── CLEANUP: Delete duplicate users with same phone ──
+      if (allUsers.length > 1) {
+        const duplicateIds = allUsers.slice(1).map((u) => u._id);
+        console.log(
+          `[Auth] 🧹 Removing ${duplicateIds.length} duplicate user(s): ${duplicateIds.join(', ')}`
+        );
+        await User.deleteMany({ _id: { $in: duplicateIds } });
+      }
     }
 
-    // Generate fresh JWT with correct user ID
     const token = generateAuthToken(user);
 
     return res.status(200).json({
@@ -112,6 +130,7 @@ exports.verifyOTP = async (req, res) => {
         email: user.email || '',
         avatarUrl: user.avatarUrl || '',
         role: user.role,
+        profileCompletion: user.profileCompletion || 0,
       },
     });
   } catch (error) {
@@ -134,7 +153,6 @@ exports.googleLogin = async (req, res) => {
       });
     }
 
-    // Verify token with Google OAuth
     const ticket = await googleClient.verifyIdToken({
       idToken,
       audience: GOOGLE_CLIENT_ID,
@@ -156,7 +174,6 @@ exports.googleLogin = async (req, res) => {
     let user = await User.findOne({ googleId });
     let isNewUser = false;
 
-    // Fallback lookup by email
     if (!user && email) {
       user = await User.findOne({ email });
     }
@@ -186,7 +203,6 @@ exports.googleLogin = async (req, res) => {
       isNewUser = true;
     }
 
-    // Generate token safely
     const token = generateAuthToken(user);
 
     return res.status(200).json({
@@ -213,7 +229,7 @@ exports.googleLogin = async (req, res) => {
 };
 
 // ─────────────────────────────────
-// 👤 GET /api/auth/profile/me
+// 👤 GET /api/auth/profile
 // ─────────────────────────────────
 exports.getProfile = async (req, res) => {
   try {

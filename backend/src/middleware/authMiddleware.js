@@ -10,18 +10,15 @@ exports.protect = async (req, res, next) => {
     }
 
     if (!token) {
-      console.log('[AUTH] No token provided in request to:', req.originalUrl);
       return res.status(401).json({
         success: false,
         message: 'Not authorized, no token provided',
       });
     }
 
-    // Verify token
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    console.log('[AUTH] Token decoded for user:', decoded.id, decoded.phoneNumber || decoded.email || '');
+    console.log('[AUTH] Token decoded:', decoded.id, decoded.phoneNumber || '');
 
-    // Attach ALL identifiers to request so controllers can fallback lookup
     req.user = {
       id: decoded.id,
       phoneNumber: decoded.phoneNumber || '',
@@ -29,27 +26,49 @@ exports.protect = async (req, res, next) => {
       role: decoded.role || 'job_seeker',
     };
 
-    // Verify user still exists — but don't reject if only ID is stale (fallback in controller)
-    const user = await User.findById(decoded.id);
+    // Verify user exists in DB
+    let user = await User.findById(decoded.id);
+
     if (!user) {
-      // Try fallback lookup by phone/email before rejecting
-      let fallbackUser = null;
+      // ── FALLBACK: JWT id is stale, find real user by phone/email ──
       if (decoded.phoneNumber) {
-        fallbackUser = await User.findOne({ phoneNumber: decoded.phoneNumber });
+        user = await User.findOne({ phoneNumber: decoded.phoneNumber })
+          .sort({ profileCompletion: -1, updatedAt: -1 });
       }
-      if (!fallbackUser && decoded.email) {
-        fallbackUser = await User.findOne({ email: decoded.email });
+      if (!user && decoded.email) {
+        user = await User.findOne({ email: decoded.email })
+          .sort({ profileCompletion: -1, updatedAt: -1 });
       }
 
-      if (fallbackUser) {
-        console.log(`[AUTH] ⚠️ Stale JWT id ${decoded.id} → fallback matched real user ${fallbackUser._id}`);
-        req.user.id = String(fallbackUser._id); // Fix the id so downstream code works
+      if (user) {
+        console.log(`[AUTH] ⚠️ Stale JWT id ${decoded.id} → corrected to ${user._id}`);
+        req.user.id = String(user._id);
       } else {
-        console.log('[AUTH] User not found in DB for id:', decoded.id);
+        console.log('[AUTH] User not found for id:', decoded.id);
         return res.status(401).json({
           success: false,
           message: 'User no longer exists',
         });
+      }
+    } else {
+      // ── CHECK: Is there a BETTER user with same phone? ──
+      // This handles the case where JWT points to an empty duplicate
+      if (decoded.phoneNumber) {
+        const betterUser = await User.findOne({ phoneNumber: decoded.phoneNumber })
+          .sort({ profileCompletion: -1, updatedAt: -1 });
+
+        if (betterUser && String(betterUser._id) !== String(user._id)) {
+          const currentCompletion = user.profileCompletion || 0;
+          const betterCompletion = betterUser.profileCompletion || 0;
+
+          if (betterCompletion > currentCompletion) {
+            console.log(
+              `[AUTH] 🔄 Switching from empty user ${user._id} (${currentCompletion}%) ` +
+              `→ data-rich user ${betterUser._id} (${betterCompletion}%)`
+            );
+            req.user.id = String(betterUser._id);
+          }
+        }
       }
     }
 

@@ -4,57 +4,20 @@ const cloudinary = require('../config/cloudinary');
 const uniq = (arr) =>
   Array.isArray(arr) ? [...new Set(arr.filter(Boolean).map(String))] : [];
 
-/**
- * Smart user lookup — tries by ID first, then falls back to phoneNumber/email from JWT
- * This handles cases where old JWTs point to stale user IDs
- */
-const findUserSmart = async (req) => {
-  const { id, phoneNumber, email } = req.user || {};
-
-  // 1. Try by _id
-  if (id) {
-    const user = await User.findById(id);
-    if (user) return user;
-    console.log(`[Profile] ⚠️ User ID ${id} not found in DB, trying phone/email fallback...`);
-  }
-
-  // 2. Fallback: by phoneNumber from JWT
-  if (phoneNumber) {
-    const user = await User.findOne({ phoneNumber });
-    if (user) {
-      console.log(`[Profile] ✅ Fallback: Found user by phone ${phoneNumber} -> ${user._id}`);
-      return user;
-    }
-  }
-
-  // 3. Fallback: by email
-  if (email) {
-    const user = await User.findOne({ email });
-    if (user) {
-      console.log(`[Profile] ✅ Fallback: Found user by email ${email} -> ${user._id}`);
-      return user;
-    }
-  }
-
-  return null;
-};
-
 exports.getMyProfile = async (req, res) => {
   try {
-    console.log(`[Profile] getMyProfile called for JWT user:`, req.user);
-    const user = await findUserSmart(req);
+    const user = await User.findById(req.user.id).select('-__v');
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
     const data = user.toObject();
-    delete data.__v;
     data.skills = uniq(data.skills);
     data.knownLanguages = uniq(data.knownLanguages);
     data.assets = uniq(data.assets);
     data.certifications = uniq(data.certifications);
 
-    console.log(`[Profile] ✅ Returning profile for ${user.phoneNumber || user.email} (${user._id})`);
+    console.log(`[Profile] ✅ GET profile: ${data.phoneNumber} (${data.name || 'no name'}) — ${data.profileCompletion || 0}%`);
     res.status(200).json({ success: true, data });
   } catch (error) {
     console.error('[Profile] getMyProfile error:', error);
@@ -73,8 +36,7 @@ exports.updateMyProfile = async (req, res) => {
       'specialization', 'certifications', 'isVisibleToRecruiters',
     ];
 
-    console.log(`[Profile] updateMyProfile called for JWT user:`, req.user);
-    const user = await findUserSmart(req);
+    const user = await User.findById(req.user.id);
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
@@ -101,7 +63,7 @@ exports.updateMyProfile = async (req, res) => {
     data.assets = uniq(data.assets);
     data.certifications = uniq(data.certifications);
 
-    console.log(`[Profile] ✅ Profile saved for ${user.phoneNumber || user.email}`);
+    console.log(`[Profile] ✅ PUT saved: ${data.phoneNumber} — ${data.profileCompletion || 0}%`);
     res.status(200).json({ success: true, message: 'Profile saved', data });
   } catch (error) {
     console.error('[Profile] updateMyProfile error:', error);
@@ -131,7 +93,7 @@ exports.uploadAvatar = async (req, res) => {
       return res.status(400).json({ success: false, message: 'No image provided' });
     }
 
-    const user = await findUserSmart(req);
+    const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
     user.avatarUrl = avatarUrl;
@@ -153,22 +115,15 @@ exports.uploadAvatar = async (req, res) => {
   }
 };
 
-/**
- * IMPORTANT:
- * - Upload PDF as resource_type: 'raw' → most reliable public link
- * - access_mode: 'public'
- * - Final URL works in browser, mobile, admin panel
- */
 exports.uploadResume = async (req, res) => {
   try {
     let resumeUrl = '';
     let resumeFileName = req.body.fileName || 'Resume.pdf';
     let resumePublicId = '';
 
-    const user = await findUserSmart(req);
+    const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-    // Delete old resume
     if (user.resumePublicId) {
       try { await cloudinary.uploader.destroy(user.resumePublicId, { resource_type: 'raw' }); } catch (_) {}
       try { await cloudinary.uploader.destroy(user.resumePublicId, { resource_type: 'image' }); } catch (_) {}
