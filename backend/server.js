@@ -12,6 +12,10 @@ const { initSocket } = require('./src/socketService');
 // force-load cloudinary early so you see logs
 require('./src/config/cloudinary');
 
+// ✅ ADD: Initialize Firebase Admin at startup (production-safe)
+const { initFirebaseAdmin } = require('./src/config/firebaseAdmin');
+initFirebaseAdmin();
+
 connectDB();
 
 const PORT = process.env.PORT || 5001;

@@ -4,20 +4,26 @@ const cloudinary = require('../config/cloudinary');
 const uniq = (arr) =>
   Array.isArray(arr) ? [...new Set(arr.filter(Boolean).map(String))] : [];
 
-// ─────────────────────────────────────────────
-// PROFILE PROJECTION — only fields the mobile app needs
-// Excludes: __v, fcmTokens (huge array), sensitive audit fields
-// ─────────────────────────────────────────────
 const PROFILE_PROJECTION = {
   __v: 0,
-  fcmTokens: 0,          // never expose FCM tokens to client
+  fcmTokens: 0,
 };
 
 // ─────────────────────────────────────────────
+// ✅ Auto-heal broken legacy resume URLs in API responses.
+// Old records stored with /image/upload/...pdf return 404.
+// This rewrites the URL on-the-fly WITHOUT touching the database.
+// ─────────────────────────────────────────────
+function healResumeUrl(url) {
+  if (!url || typeof url !== 'string') return url;
+  if (url.includes('/image/upload/') && url.toLowerCase().endsWith('.pdf')) {
+    return url.replace('/image/upload/', '/raw/upload/');
+  }
+  return url;
+}
+
+// ─────────────────────────────────────────────
 // GET /api/profile/me
-// ✅ Uses projection to exclude fcmTokens (large array)
-// ✅ Consistent error shape
-// ✅ Cache headers
 // ─────────────────────────────────────────────
 exports.getMyProfile = async (req, res) => {
   try {
@@ -30,11 +36,13 @@ exports.getMyProfile = async (req, res) => {
       });
     }
 
-    // Normalize arrays
     user.skills = uniq(user.skills);
     user.knownLanguages = uniq(user.knownLanguages);
     user.assets = uniq(user.assets);
     user.certifications = uniq(user.certifications);
+
+    // ✅ Auto-heal legacy resume URL
+    user.resumeUrl = healResumeUrl(user.resumeUrl);
 
     res.set('Cache-Control', 'private, max-age=30');
     res.status(200).json({ success: true, data: user });
@@ -51,8 +59,6 @@ exports.getMyProfile = async (req, res) => {
 
 // ─────────────────────────────────────────────
 // PUT /api/profile/me
-// ✅ Whitelist approach — no field pollution
-// ✅ Returns projected user (no fcmTokens)
 // ─────────────────────────────────────────────
 exports.updateMyProfile = async (req, res) => {
   try {
@@ -89,7 +95,6 @@ exports.updateMyProfile = async (req, res) => {
 
     await user.save();
 
-    // Return projected data (no fcmTokens, no __v)
     const data = user.toObject();
     delete data.__v;
     delete data.fcmTokens;
@@ -97,6 +102,9 @@ exports.updateMyProfile = async (req, res) => {
     data.knownLanguages = uniq(data.knownLanguages);
     data.assets = uniq(data.assets);
     data.certifications = uniq(data.certifications);
+
+    // ✅ Auto-heal legacy resume URL
+    data.resumeUrl = healResumeUrl(data.resumeUrl);
 
     res.status(200).json({ success: true, message: 'Profile saved', data });
   } catch (error) {
@@ -111,7 +119,7 @@ exports.updateMyProfile = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────
-// POST /api/profile/upload-avatar
+// POST /api/profile/upload-avatar (UNCHANGED)
 // ─────────────────────────────────────────────
 exports.uploadAvatar = async (req, res) => {
   try {
@@ -170,11 +178,8 @@ exports.uploadAvatar = async (req, res) => {
   }
 };
 
-
 // ─────────────────────────────────────────────
-// POST /api/profile/upload-resume
-// ✅ Uses resource_type: 'raw' with explicit .pdf in public_id
-// ✅ Prevents Ghostscript 500 errors and 404 URL mismatch
+// POST /api/profile/upload-resume (UNCHANGED — already correct)
 // ─────────────────────────────────────────────
 exports.uploadResume = async (req, res) => {
   try {
@@ -191,7 +196,6 @@ exports.uploadResume = async (req, res) => {
       });
     }
 
-    // Cleanup old resume from Cloudinary
     if (user.resumePublicId) {
       try { await cloudinary.uploader.destroy(user.resumePublicId, { resource_type: 'raw' }); } catch (_) {}
       try { await cloudinary.uploader.destroy(user.resumePublicId, { resource_type: 'image' }); } catch (_) {}
@@ -204,11 +208,8 @@ exports.uploadResume = async (req, res) => {
       resumePublicId = req.file.filename || req.file.public_id;
     } else if (req.body.resume || req.body.file || req.body.base64) {
       const fileStr = req.body.resume || req.body.file || req.body.base64;
-      
-      // ✅ FIX 1: Explicitly include .pdf in the public_id so Cloudinary serves the true filename
       const publicId = `resume_${user._id}_${Date.now()}.pdf`;
 
-      // ✅ FIX 2: Use resource_type: 'raw' so Cloudinary stores the authentic PDF without image rastering
       const uploadRes = await cloudinary.uploader.upload(fileStr, {
         folder: 'careerflow/resumes',
         resource_type: 'raw',
@@ -218,7 +219,6 @@ exports.uploadResume = async (req, res) => {
         overwrite: true,
       });
 
-      // ✅ FIX 3: Use Cloudinary's exact returned secure_url directly
       resumeUrl = uploadRes.secure_url;
       resumePublicId = uploadRes.public_id;
     } else {
@@ -257,8 +257,7 @@ exports.uploadResume = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────
-// GET /api/profile/all  (recruiter-facing list)
-// ✅ Uses projection — lightweight cards, not full docs
+// GET /api/profile/all (UNCHANGED)
 // ─────────────────────────────────────────────
 exports.getAllProfiles = async (req, res) => {
   try {

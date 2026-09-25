@@ -71,6 +71,7 @@ app.use('/locations', locationRoutes);
 
 // Notifications
 app.use('/api/users', fcmRoutes);
+app.use('/api/notifications', fcmRoutes); // ✅ FIX: Alias so mobile app's /api/notifications/fcm-token works
 app.use('/api/v1/notifications', internalNotificationRoutes);
 
 app.get('/', (req, res) => {
