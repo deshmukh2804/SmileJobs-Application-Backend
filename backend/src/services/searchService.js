@@ -7,49 +7,67 @@ const { distanceKm, getJobCoords, escapeRegex } = require('../utils/geoUtils');
 
 async function searchJobs({ q, city, area, category, coords, radiusKm, page, limit }) {
   const skip = (page - 1) * limit;
+  
+  // Start with the default live job filtering rules
   const filter = { ...liveJobFilter() };
+  const andConditions = [];
 
-  // Text search — case-insensitive regex pattern
+  // ─── INTELLIGENT WORD-TOKENIZED TEXT SEARCH ───
+  // Splits multi-word queries (e.g. "Baner Pune", "Kharadi Developer") 
+  // and ensures every term matches somewhere in the document fields or location object.
   if (q && q.trim()) {
-    const rx = new RegExp(escapeRegex(q.trim()), 'i');
-    filter.$or = [
-      { title: rx },
-      { role: rx },
-      { companyName: rx },
-      { skills: rx },
-      { category: rx },
-      { department: rx },
-    ];
+    const words = q.trim().split(/\s+/).filter(w => w.length > 0);
+    
+    words.forEach(word => {
+      const rx = new RegExp(escapeRegex(word), 'i');
+      andConditions.push({
+        $or: [
+          { title: rx },
+          { role: rx },
+          { companyName: rx },
+          { skills: rx },
+          { category: rx },
+          { department: rx },
+          { 'location.city': rx },
+          { 'location.address': rx },
+          { 'location.state': rx },
+          { 'location.subLocation': rx }
+        ]
+      });
+    });
   }
 
-  // City search — case-insensitive
+  // ─── EXPLICIT CITY FILTER ───
   if (city && city.trim()) {
-    filter['location.city'] = new RegExp(escapeRegex(city.trim()), 'i');
+    andConditions.push({
+      'location.city': new RegExp(escapeRegex(city.trim()), 'i')
+    });
   }
 
-  // Area search — case-insensitive sub-location address matching
+  // ─── EXPLICIT AREA FILTER ───
   if (area && area.trim()) {
     const areaRx = new RegExp(escapeRegex(area.trim()), 'i');
-    const areaQuery = {
+    andConditions.push({
       $or: [
         { 'location.address': areaRx },
         { 'location.subLocation': areaRx }
       ]
-    };
-    if (filter.$or) {
-      filter.$and = [{ $or: filter.$or }, areaQuery];
-      delete filter.$or;
-    } else {
-      filter.$or = areaQuery.$or;
-    }
+    });
   }
 
-  // Category selection match
+  // ─── EXPLICIT CATEGORY FILTER ───
   if (category && category.trim()) {
-    filter.category = new RegExp(`^${escapeRegex(category.trim())}$`, 'i');
+    andConditions.push({
+      category: new RegExp(`^${escapeRegex(category.trim())}$`, 'i')
+    });
   }
 
-  // Handle GPS coordinate filtering
+  // Apply consolidated list of terms if any filters are active
+  if (andConditions.length > 0) {
+    filter.$and = andConditions;
+  }
+
+  // ─── GEOGRAPHIC COORDINATE RADIUS SELECTION ───
   if (coords && coords.lat != null && coords.lon != null) {
     const batchSize = Math.min(300, limit * 15);
     const allJobs = await Job.find(filter, JOB_CARD_PROJECTION)
@@ -100,7 +118,7 @@ async function searchJobs({ q, city, area, category, coords, radiusKm, page, lim
     };
   }
 
-  // Direct paginated Mongo lookup without geographic context
+  // ─── DIRECT MONGODB DATA RETRIEVAL ───
   const [jobs, total] = await Promise.all([
     Job.find(filter, JOB_CARD_PROJECTION)
       .sort({ postedAt: -1, createdAt: -1 })
