@@ -56,7 +56,7 @@ app.use('/api/auth', authRoutes);
 app.use('/auth', authRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/profile', profileRoutes);
-
+app.use('/api/v1/search', require('./routes/searchRoutes'));
 // SDUI & Jobs
 app.use('/api/v1', homeRoutes);
 app.use('/api/v1/jobs', jobRoutes);
