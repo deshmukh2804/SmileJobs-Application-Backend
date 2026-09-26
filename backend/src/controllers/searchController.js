@@ -5,7 +5,6 @@ const { parseCoords, parsePagination } = require('../utils/geoUtils');
 
 exports.searchJobs = async (req, res) => {
   try {
-    // Safely parse pagination without destructuring crash
     const pagination = parsePagination(req) || { page: 1, limit: 20, skip: 0 };
     const { page, limit } = pagination;
 
@@ -17,14 +16,7 @@ exports.searchJobs = async (req, res) => {
     const radiusKm = Math.min(500, parseFloat(req.query.radiusKm) || 50);
 
     const result = await searchService.searchJobs({
-      q,
-      city,
-      area,
-      category,
-      coords,
-      radiusKm,
-      page,
-      limit,
+      q, city, area, category, coords, radiusKm, page, limit,
     });
 
     res.status(200).json({
@@ -54,7 +46,7 @@ exports.getPopularCategories = async (req, res) => {
 exports.getSearchSuggestions = async (req, res) => {
   try {
     const q = (req.query.q || '').toString().trim();
-    const limit = Math.min(10, parseInt(req.query.limit, 10) || 5);
+    const limit = Math.min(15, parseInt(req.query.limit, 10) || 8);
     const suggestions = await searchService.getSearchSuggestions({ q, limit });
     res.status(200).json({ success: true, suggestions });
   } catch (error) {
@@ -71,5 +63,16 @@ exports.getAreasByCity = async (req, res) => {
   } catch (error) {
     console.error('[search.areas] error:', error.message);
     res.status(500).json({ success: false, message: error.message, areas: [] });
+  }
+};
+
+// ─── NEW: LIST AVAILABLE CITIES ─
+exports.getAvailableCities = async (req, res) => {
+  try {
+    const cities = await searchService.getAvailableCities();
+    res.status(200).json({ success: true, cities });
+  } catch (error) {
+    console.error('[search.cities] error:', error.message);
+    res.status(500).json({ success: false, message: error.message, cities: [] });
   }
 };
