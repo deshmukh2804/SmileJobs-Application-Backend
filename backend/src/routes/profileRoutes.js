@@ -18,7 +18,7 @@ router.post('/upload-avatar', protect, avatarUp.single('avatar'), uploadAvatar);
 router.post('/upload-resume', protect, resumeUp.single('resume'), uploadResume);
 router.get('/all', protect, getAllProfiles);
 
-// ✅ Resume View & Download Endpoints
+// Secure Resume Viewer Endpoints
 router.get('/resume/view/:userId?', optionalAuth, viewResume);
 router.get('/resume/download/:userId?', optionalAuth, downloadResume);
 

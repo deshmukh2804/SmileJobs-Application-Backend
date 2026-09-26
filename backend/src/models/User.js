@@ -17,7 +17,7 @@ const userSchema = new mongoose.Schema(
   {
     // ── Auth Identifiers ──
     phoneNumber: { type: String, trim: true },
-    phone: { type: String, trim: true }, // Added phone alias
+    phone: { type: String, trim: true }, // phone alias
     googleId: { type: String, trim: true },
     authProvider: {
       type: String,
@@ -114,10 +114,40 @@ userSchema.index(
 userSchema.index({ 'fcmTokens.token': 1 });
 
 userSchema.pre('save', function (next) {
-  // Sync phone fields
+  // Safe Cleanup: Prevent index collisions by setting empty values to undefined
+  if (this.email) {
+    this.email = this.email.trim().toLowerCase();
+    if (this.email === '') {
+      this.email = undefined;
+    }
+  }
+
+  if (this.phoneNumber) {
+    this.phoneNumber = this.phoneNumber.trim();
+    if (this.phoneNumber === '') {
+      this.phoneNumber = undefined;
+    }
+  }
+
+  if (this.phone) {
+    this.phone = this.phone.trim();
+    if (this.phone === '') {
+      this.phone = undefined;
+    }
+  }
+
+  if (this.googleId) {
+    this.googleId = this.googleId.trim();
+    if (this.googleId === '') {
+      this.googleId = undefined;
+    }
+  }
+
+  // Synchronize phone fields
   if (this.phoneNumber && !this.phone) this.phone = this.phoneNumber;
   if (this.phone && !this.phoneNumber) this.phoneNumber = this.phone;
 
+  // Score completion check
   let score = 0;
   const checks = [
     this.name, (this.phoneNumber || this.phone), this.email, this.gender, this.birthday, this.city,

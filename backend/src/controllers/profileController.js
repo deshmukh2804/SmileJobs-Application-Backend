@@ -28,6 +28,7 @@ function getResumeProxyUrl(user, req) {
 // ─────────────────────────────────────────────
 exports.getMyProfile = async (req, res) => {
   try {
+    // Identity Enforcement: Derive query exclusively from the securely verified JWT ID
     const user = await User.findById(req.user.id, PROFILE_PROJECTION).lean();
     if (!user) {
       return res.status(404).json({
@@ -46,7 +47,11 @@ exports.getMyProfile = async (req, res) => {
       user.resumeUrl = getResumeProxyUrl(user, req);
     }
 
-    res.set('Cache-Control', 'private, max-age=30');
+    // ✅ FIX: Absolute Cache Invalidation to prevent shared-device profile hijacking
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+
     res.status(200).json({ success: true, data: user });
   } catch (error) {
     console.error('[profile.getMe] error:', error);
@@ -64,7 +69,6 @@ exports.getMyProfile = async (req, res) => {
 // ─────────────────────────────────────────────
 exports.updateMyProfile = async (req, res) => {
   try {
-    // ✅ ADDED 'phoneNumber' AND 'phone' TO ALLOWED KEYS
     const allowed = [
       'name', 'phoneNumber', 'phone', 'email', 'gender', 'birthday', 'city', 'subLocation',
       'englishLevel', 'knownLanguages', 'aboutMe',
@@ -83,11 +87,13 @@ exports.updateMyProfile = async (req, res) => {
       });
     }
 
-    // 🔥 Explicitly handle phone number saving for both phoneNumber and phone fields
+    // Normalize phone number input values explicitly
     if (req.body.phoneNumber || req.body.phone) {
       const phoneNumberVal = String(req.body.phoneNumber || req.body.phone).trim();
-      user.phoneNumber = phoneNumberVal;
-      user.phone = phoneNumberVal;
+      if (phoneNumberVal) {
+        user.phoneNumber = phoneNumberVal;
+        user.phone = phoneNumberVal;
+      }
     }
 
     allowed.forEach((key) => {
@@ -116,6 +122,11 @@ exports.updateMyProfile = async (req, res) => {
     if (data.resumeUrl || data.resumePublicId) {
       data.resumeUrl = getResumeProxyUrl(data, req);
     }
+
+    // Force absolute cache control on profile changes as well
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
 
     res.status(200).json({ success: true, message: 'Profile saved', data });
   } catch (error) {
