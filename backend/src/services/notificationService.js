@@ -19,19 +19,10 @@ function safeString(val) {
 }
 
 // ─────────────────────────────────────────────
-// ✅ Extract User's first name for personalization
-// ─────────────────────────────────────────────
-function getFirstName(fullName) {
-  const name = safeString(fullName).trim();
-  if (!name) return '';
-  return name.split(/\s+/)[0] || '';
-}
-
-// ─────────────────────────────────────────────
-// 📋 TEMPLATE 1 — NEW JOB NOTIFICATION
+// 📋 TEMPLATE 1 — NEW JOB NOTIFICATION (NAMELESS)
 // Used when type = job_alert | new_job | job
 // ─────────────────────────────────────────────
-function buildJobNotificationTemplate(firstName, doc) {
+function buildJobNotificationTemplate(doc) {
   const d = doc.data || {};
 
   const jobTitle = safeString(d.title || d.jobTitle || doc.title) || 'New Opportunity';
@@ -42,16 +33,9 @@ function buildJobNotificationTemplate(firstName, doc) {
   const deadline = safeString(d.deadline || d.applyBefore);
 
   // ── Title ──
-  let title = '';
-  if (firstName && company) {
-    title = `${firstName}, new ${jobTitle} at ${company}! 🔥`;
-  } else if (firstName) {
-    title = `${firstName}, a new ${jobTitle} just dropped! 🔥`;
-  } else if (company) {
-    title = `New ${jobTitle} opening at ${company} 🔥`;
-  } else {
-    title = `New ${jobTitle} just posted! 🔥`;
-  }
+  const title = company 
+    ? `New ${jobTitle} opening at ${company}! 🔥` 
+    : `New ${jobTitle} just posted! 🔥`;
 
   // ── Body ──
   const parts = [];
@@ -67,18 +51,11 @@ function buildJobNotificationTemplate(firstName, doc) {
 }
 
 // ─────────────────────────────────────────────
-// 📋 TEMPLATE 2 — GENERAL PUSH NOTIFICATION
-// Used for interview slots, confirmations, messages, etc.
-// All sender names come DYNAMICALLY from the doc — nothing hardcoded.
+// 📋 TEMPLATE 2 — GENERAL PUSH NOTIFICATION (NAMELESS)
+// Used for interview slots, status changes, chats, etc.
 // ─────────────────────────────────────────────
-function buildPushNotificationTemplate(firstName, doc) {
+function buildPushNotificationTemplate(doc) {
   const d = doc.data || {};
-
-  // ── Dynamically resolve sender / HR name ──
-  // Priority: data.hrName → data.recruiterName → sentBy.adminName → empty
-  const senderName = safeString(
-    d.hrName || d.recruiterName || d.senderName || doc.sentBy?.adminName || ''
-  ).trim();
 
   const action     = safeString(d.action || d.eventType || 'update');
   const jobTitle   = safeString(d.title || d.jobTitle || doc.title) || '';
@@ -86,34 +63,20 @@ function buildPushNotificationTemplate(firstName, doc) {
   const location   = safeString(d.location || d.city || doc.targetCity);
   const slotTime   = safeString(d.slotTime || d.interviewTime || d.scheduledAt);
 
-  // ── Build contextual intro (NO hardcoded names) ──
-  let intro = '';
-  if (senderName && action === 'interview') {
-    intro = `${senderName} has scheduled your interview.`;
-  } else if (senderName && action === 'shortlist') {
-    intro = `${senderName} has shortlisted your profile!`;
-  } else if (senderName) {
-    intro = `${senderName} sent you an update.`;
-  } else if (action === 'interview') {
-    intro = 'Your interview slot is confirmed.';
+  // ── Contextual Intro ──
+  let intro = 'A new update has been posted.';
+  if (action === 'interview') {
+    intro = 'An interview slot has been scheduled.';
   } else if (action === 'shortlist') {
-    intro = 'Congratulations! You have been shortlisted.';
-  } else {
-    intro = 'You have a new update.';
+    intro = 'Your profile has been shortlisted!';
   }
 
   // ── Title ──
-  let title = '';
-  if (firstName && action === 'interview') {
-    title = `${firstName}, interview slot confirmed! 🕒`;
-  } else if (firstName && action === 'shortlist') {
-    title = `${firstName}, you're shortlisted! 🎉`;
-  } else if (firstName) {
-    title = `${firstName}, you have a new update 📬`;
-  } else if (action === 'interview') {
-    title = `Interview slot confirmed! 🕒`;
-  } else {
-    title = `New update for you 📬`;
+  let title = 'New update available 📬';
+  if (action === 'interview') {
+    title = 'Interview slot confirmed! 🕒';
+  } else if (action === 'shortlist') {
+    title = "You're shortlisted! 🎉";
   }
 
   // ── Body ──
@@ -130,16 +93,15 @@ function buildPushNotificationTemplate(firstName, doc) {
 // ─────────────────────────────────────────────
 // 🔀 TEMPLATE ROUTER — picks the right builder
 // ─────────────────────────────────────────────
-function buildTemplate(firstName, doc) {
+function buildTemplate(doc) {
   const type = String(doc.type || '').toLowerCase().trim();
-
   const JOB_TYPES = ['job_alert', 'new_job', 'job', 'job_opening', 'job_post'];
 
   if (JOB_TYPES.includes(type)) {
-    return buildJobNotificationTemplate(firstName, doc);
+    return buildJobNotificationTemplate(doc);
   }
 
-  return buildPushNotificationTemplate(firstName, doc);
+  return buildPushNotificationTemplate(doc);
 }
 
 /**
@@ -281,13 +243,13 @@ async function resolveTargetUsers(notificationDoc) {
       break;
   }
 
-  const users = await User.find(query).select('fcmTokens name').lean();
+  // Optimized fetch: We no longer need the user's name field
+  const users = await User.find(query).select('fcmTokens').lean();
   return users;
 }
 
 /**
  * Dispatches push notification from a MongoDB Notification doc.
- * Automatically selects the correct template based on notification type.
  */
 async function pushForNotification(notificationDoc) {
   const users = await resolveTargetUsers(notificationDoc);
@@ -304,33 +266,34 @@ async function pushForNotification(notificationDoc) {
   const mobileType = mapType(notificationDoc.type);
   const isBulkSend = users.length > 2000;
 
+  // Since names are completely removed, we can build the template title and body
+  // ONCE per push execution, making notifications dispatch significantly faster!
+  const { title, body } = buildTemplate(notificationDoc);
+
   const globalDataPayload = {
     type: mobileType,
     notificationId: String(notificationDoc._id),
+    title,
+    body,
     ...(notificationDoc.data || {}),
   };
 
-  // ── PERSONALIZED SEND (< 2000 users) ──
+  // ── INDIVIDUAL DISPATCH (< 2000 users) ──
   if (!isBulkSend) {
     let successCount = 0;
     let failureCount = 0;
     let invalidTokensRemoved = 0;
 
-    console.log(`[FCM] Sending personalized alerts to ${users.length} users...`);
+    console.log(`[FCM] Dispatching nameless structured alerts to ${users.length} users...`);
 
     for (const u of users) {
-      const firstName = getFirstName(u.name);
-
-      // 🔀 Auto-select template: Job vs Push
-      const { title, body } = buildTemplate(firstName, notificationDoc);
-
       const tokens = (u.fcmTokens || []).map(t => t.token).filter(Boolean);
       if (!tokens.length) continue;
 
       const res = await sendToTokens(
         tokens,
         { title, body, imageUrl: notificationDoc.imageUrl || '' },
-        { ...globalDataPayload, title, body }
+        globalDataPayload
       );
 
       successCount += res.successCount || 0;
@@ -341,10 +304,8 @@ async function pushForNotification(notificationDoc) {
     return { success: successCount > 0, successCount, failureCount, invalidTokensRemoved };
   }
 
-  // ── BULK MULTICAST (≥ 2000 users, no personalization) ──
-  console.log(`[FCM] Sending bulk multicast to ${users.length} recipients...`);
-
-  const { title, body } = buildTemplate('', notificationDoc);
+  // ── MULTICAST DISPATCH (≥ 2000 users) ──
+  console.log(`[FCM] Dispatching nameless bulk multicast to ${users.length} recipients...`);
 
   const allTokens = [];
   users.forEach((u) => {
@@ -356,7 +317,7 @@ async function pushForNotification(notificationDoc) {
   return sendToTokens(
     allTokens,
     { title, body, imageUrl: notificationDoc.imageUrl || '' },
-    { ...globalDataPayload, title, body }
+    globalDataPayload
   );
 }
 
