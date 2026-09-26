@@ -1,21 +1,15 @@
+// backend/services/searchService.js
+
 const Job = require('../models/Job');
 const { _helpers } = require('../controllers/homeController');
 const { liveJobFilter, JOB_CARD_PROJECTION, transformJobCard } = _helpers;
-const { LOCAL_COORDS, distanceKm, getJobCoords, escapeRegex } = require('../utils/geoUtils');
+const { distanceKm, getJobCoords, escapeRegex } = require('../utils/geoUtils');
 
-const MAX_LIMIT = 50;
-const DEFAULT_LIMIT = 20;
-const DEFAULT_RADIUS_KM = 50;
-
-/**
- * Main job search function
- * Supports: text query, city filter, area filter, category filter, geo-based distance
- */
 async function searchJobs({ q, city, area, category, coords, radiusKm, page, limit }) {
   const skip = (page - 1) * limit;
   const filter = { ...liveJobFilter() };
 
-  // Text search — case-insensitive regex OR match
+  // Text search — case-insensitive regex pattern
   if (q && q.trim()) {
     const rx = new RegExp(escapeRegex(q.trim()), 'i');
     filter.$or = [
@@ -28,29 +22,34 @@ async function searchJobs({ q, city, area, category, coords, radiusKm, page, lim
     ];
   }
 
-  // City filter
+  // City search — case-insensitive
   if (city && city.trim()) {
     filter['location.city'] = new RegExp(escapeRegex(city.trim()), 'i');
   }
 
-  // Area filter (matches address field OR sub-location)
+  // Area search — case-insensitive sub-location address matching
   if (area && area.trim()) {
     const areaRx = new RegExp(escapeRegex(area.trim()), 'i');
+    const areaQuery = {
+      $or: [
+        { 'location.address': areaRx },
+        { 'location.subLocation': areaRx }
+      ]
+    };
     if (filter.$or) {
-      // If we already have $or from text search, combine using $and
-      filter.$and = [{ $or: filter.$or }, { $or: [{ 'location.address': areaRx }, { 'location.subLocation': areaRx }] }];
+      filter.$and = [{ $or: filter.$or }, areaQuery];
       delete filter.$or;
     } else {
-      filter.$or = [{ 'location.address': areaRx }, { 'location.subLocation': areaRx }];
+      filter.$or = areaQuery.$or;
     }
   }
 
-  // Category filter
+  // Category selection match
   if (category && category.trim()) {
     filter.category = new RegExp(`^${escapeRegex(category.trim())}$`, 'i');
   }
 
-  // If coords provided, we need to compute distance — fetch larger batch, filter, sort
+  // Handle GPS coordinate filtering
   if (coords && coords.lat != null && coords.lon != null) {
     const batchSize = Math.min(300, limit * 15);
     const allJobs = await Job.find(filter, JOB_CARD_PROJECTION)
@@ -71,7 +70,7 @@ async function searchJobs({ q, city, area, category, coords, radiusKm, page, lim
       }
     }
 
-    // Sort by distance (closest first)
+    // Sort closest jobs first
     withDistance.sort((a, b) => {
       if (a._realDistanceKm == null && b._realDistanceKm == null) return 0;
       if (a._realDistanceKm == null) return 1;
@@ -101,9 +100,13 @@ async function searchJobs({ q, city, area, category, coords, radiusKm, page, lim
     };
   }
 
-  // No coords — simple filter + pagination
+  // Direct paginated Mongo lookup without geographic context
   const [jobs, total] = await Promise.all([
-    Job.find(filter, JOB_CARD_PROJECTION).sort({ postedAt: -1, createdAt: -1 }).skip(skip).limit(limit).lean(),
+    Job.find(filter, JOB_CARD_PROJECTION)
+      .sort({ postedAt: -1, createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
     Job.countDocuments(filter),
   ]);
 
@@ -113,9 +116,6 @@ async function searchJobs({ q, city, area, category, coords, radiusKm, page, lim
   };
 }
 
-/**
- * Get popular categories with actual job counts
- */
 async function getPopularCategories({ limit = 8 }) {
   const pipeline = [
     { $match: liveJobFilter() },
@@ -142,9 +142,6 @@ async function getPopularCategories({ limit = 8 }) {
   return result.filter((r) => r.category && r.count > 0);
 }
 
-/**
- * Get search suggestions (autocomplete)
- */
 async function getSearchSuggestions({ q, limit = 5 }) {
   if (!q || q.trim().length < 2) return [];
   const rx = new RegExp(escapeRegex(q.trim()), 'i');
@@ -164,9 +161,6 @@ async function getSearchSuggestions({ q, limit = 5 }) {
   return Array.from(suggestions).slice(0, limit);
 }
 
-/**
- * Get distinct areas for a city — from actual job locations
- */
 async function getAreasByCity({ city }) {
   if (!city || !city.trim()) return [];
   const filter = { ...liveJobFilter(), 'location.city': new RegExp(escapeRegex(city.trim()), 'i') };
@@ -181,7 +175,6 @@ async function getAreasByCity({ city }) {
     const sub = j.location?.subLocation?.trim();
     if (sub) areas.add(sub);
     else if (addr) {
-      // Extract first meaningful segment of address
       const first = addr.split(',')[0]?.trim();
       if (first && first.length > 2) areas.add(first);
     }
@@ -189,4 +182,9 @@ async function getAreasByCity({ city }) {
   return Array.from(areas).sort();
 }
 
-module.exports = { searchJobs, getPopularCategories, getSearchSuggestions, getAreasByCity };
+module.exports = {
+  searchJobs,
+  getPopularCategories,
+  getSearchSuggestions,
+  getAreasByCity,
+};

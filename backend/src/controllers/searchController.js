@@ -1,9 +1,14 @@
+// backend/controllers/searchController.js
+
 const searchService = require('../services/searchService');
 const { parseCoords, parsePagination } = require('../utils/geoUtils');
 
 exports.searchJobs = async (req, res) => {
   try {
-    const { page, limit } = parsePagination(req);
+    // Safely parse pagination without destructuring crash
+    const pagination = parsePagination(req) || { page: 1, limit: 20, skip: 0 };
+    const { page, limit } = pagination;
+
     const q = (req.query.q || '').toString().trim();
     const city = (req.query.city || '').toString().trim();
     const area = (req.query.area || '').toString().trim();
@@ -12,7 +17,14 @@ exports.searchJobs = async (req, res) => {
     const radiusKm = Math.min(500, parseFloat(req.query.radiusKm) || 50);
 
     const result = await searchService.searchJobs({
-      q, city, area, category, coords, radiusKm, page, limit,
+      q,
+      city,
+      area,
+      category,
+      coords,
+      radiusKm,
+      page,
+      limit,
     });
 
     res.status(200).json({
@@ -30,7 +42,7 @@ exports.searchJobs = async (req, res) => {
 
 exports.getPopularCategories = async (req, res) => {
   try {
-    const limit = Math.min(20, parseInt(req.query.limit) || 8);
+    const limit = Math.min(20, parseInt(req.query.limit, 10) || 8);
     const data = await searchService.getPopularCategories({ limit });
     res.status(200).json({ success: true, data });
   } catch (error) {
@@ -42,10 +54,11 @@ exports.getPopularCategories = async (req, res) => {
 exports.getSearchSuggestions = async (req, res) => {
   try {
     const q = (req.query.q || '').toString().trim();
-    const limit = Math.min(10, parseInt(req.query.limit) || 5);
+    const limit = Math.min(10, parseInt(req.query.limit, 10) || 5);
     const suggestions = await searchService.getSearchSuggestions({ q, limit });
     res.status(200).json({ success: true, suggestions });
   } catch (error) {
+    console.error('[search.suggestions] error:', error.message);
     res.status(500).json({ success: false, message: error.message, suggestions: [] });
   }
 };
@@ -56,6 +69,7 @@ exports.getAreasByCity = async (req, res) => {
     const areas = await searchService.getAreasByCity({ city });
     res.status(200).json({ success: true, areas });
   } catch (error) {
+    console.error('[search.areas] error:', error.message);
     res.status(500).json({ success: false, message: error.message, areas: [] });
   }
 };
