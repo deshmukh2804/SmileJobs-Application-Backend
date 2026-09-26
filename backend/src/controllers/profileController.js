@@ -68,8 +68,9 @@ exports.getMyProfile = async (req, res) => {
 // ─────────────────────────────────────────────
 exports.updateMyProfile = async (req, res) => {
   try {
+    // 🔥 ADDED 'phoneNumber' HERE SO IT ACTUALLY SAVES TO DATABASE!
     const allowed = [
-      'name', 'email', 'gender', 'birthday', 'city', 'subLocation',
+      'name', 'phoneNumber', 'email', 'gender', 'birthday', 'city', 'subLocation',
       'englishLevel', 'knownLanguages', 'aboutMe',
       'totalExperience', 'experienceLevel', 'workType', 'industry',
       'currentSalary', 'currentCompany', 'startDate', 'jobTitle',
@@ -268,7 +269,6 @@ exports.uploadResume = async (req, res) => {
 
 // ─────────────────────────────────────────────
 // GET /api/profile/resume/view/:userId?
-// ✅ Direct PDF stream to client (Bypasses all Cloudinary ACL restrictions)
 // ─────────────────────────────────────────────
 exports.viewResume = async (req, res) => {
   try {
@@ -284,7 +284,6 @@ exports.viewResume = async (req, res) => {
 
     const candidateUrls = [];
 
-    // 1. Authenticated private download URL
     if (user.resumePublicId) {
       try {
         const privateUrl = cloudinary.utils.private_download_url(user.resumePublicId, '', {
@@ -306,7 +305,6 @@ exports.viewResume = async (req, res) => {
       } catch (_) {}
     }
 
-    // 2. Database stored URL
     if (user.resumeUrl) {
       candidateUrls.push(user.resumeUrl);
       if (user.resumeUrl.includes('/image/upload/')) {
