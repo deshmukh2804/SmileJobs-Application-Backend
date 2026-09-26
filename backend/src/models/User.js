@@ -17,6 +17,7 @@ const userSchema = new mongoose.Schema(
   {
     // ── Auth Identifiers ──
     phoneNumber: { type: String, trim: true },
+    phone: { type: String, trim: true }, // Added phone alias
     googleId: { type: String, trim: true },
     authProvider: {
       type: String,
@@ -88,7 +89,7 @@ const userSchema = new mongoose.Schema(
     profileCompletion: { type: Number, default: 0 },
     isVisibleToRecruiters: { type: Boolean, default: true },
 
-    // ✅ FCM Push Notification Tokens (multi-device)
+    // FCM Push Notification Tokens
     fcmTokens: { type: [fcmTokenSchema], default: [] },
   },
   { timestamps: true }
@@ -110,13 +111,16 @@ userSchema.index(
   { unique: true, partialFilterExpression: { email: { $type: 'string', $gt: '' } } }
 );
 
-// ✅ Index for FCM token lookups (fast reverse-lookup when sending notifications)
 userSchema.index({ 'fcmTokens.token': 1 });
 
 userSchema.pre('save', function (next) {
+  // Sync phone fields
+  if (this.phoneNumber && !this.phone) this.phone = this.phoneNumber;
+  if (this.phone && !this.phoneNumber) this.phoneNumber = this.phone;
+
   let score = 0;
   const checks = [
-    this.name, this.email, this.gender, this.birthday, this.city,
+    this.name, (this.phoneNumber || this.phone), this.email, this.gender, this.birthday, this.city,
     this.englishLevel, this.aboutMe, this.totalExperience, this.jobTitle,
     this.currentCompany, this.collegeName, this.resumeUrl, this.avatarUrl,
   ];
@@ -128,7 +132,4 @@ userSchema.pre('save', function (next) {
   next();
 });
 
-// ✅ CRITICAL: Bind User model to the careerflow_admin DB connection
-// This ensures ALL profile reads/writes go to the correct database
-// where the original user data is stored (users collection).
 module.exports = careerflowAdminDbConnection.model('User', userSchema);

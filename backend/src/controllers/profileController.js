@@ -9,9 +9,6 @@ const PROFILE_PROJECTION = {
   fcmTokens: 0,
 };
 
-// ─────────────────────────────────────────────
-// Helper to construct backend base URL dynamically
-// ─────────────────────────────────────────────
 function getBackendBaseUrl(req) {
   if (process.env.BACKEND_URL) return process.env.BACKEND_URL.replace(/\/+$/, '');
   if (process.env.API_URL) return process.env.API_URL.replace(/\/api\/?$/, '').replace(/\/+$/, '');
@@ -45,7 +42,6 @@ exports.getMyProfile = async (req, res) => {
     user.assets = uniq(user.assets);
     user.certifications = uniq(user.certifications);
 
-    // Provide reliable backend proxy URL for resume viewing
     if (user.resumeUrl || user.resumePublicId) {
       user.resumeUrl = getResumeProxyUrl(user, req);
     }
@@ -68,9 +64,9 @@ exports.getMyProfile = async (req, res) => {
 // ─────────────────────────────────────────────
 exports.updateMyProfile = async (req, res) => {
   try {
-    // 🔥 ADDED 'phoneNumber' HERE SO IT ACTUALLY SAVES TO DATABASE!
+    // ✅ ADDED 'phoneNumber' AND 'phone' TO ALLOWED KEYS
     const allowed = [
-      'name', 'phoneNumber', 'email', 'gender', 'birthday', 'city', 'subLocation',
+      'name', 'phoneNumber', 'phone', 'email', 'gender', 'birthday', 'city', 'subLocation',
       'englishLevel', 'knownLanguages', 'aboutMe',
       'totalExperience', 'experienceLevel', 'workType', 'industry',
       'currentSalary', 'currentCompany', 'startDate', 'jobTitle',
@@ -85,6 +81,13 @@ exports.updateMyProfile = async (req, res) => {
         message: 'User not found',
         code: 'USER_NOT_FOUND',
       });
+    }
+
+    // 🔥 Explicitly handle phone number saving for both phoneNumber and phone fields
+    if (req.body.phoneNumber || req.body.phone) {
+      const phoneNumberVal = String(req.body.phoneNumber || req.body.phone).trim();
+      user.phoneNumber = phoneNumberVal;
+      user.phone = phoneNumberVal;
     }
 
     allowed.forEach((key) => {
@@ -204,7 +207,6 @@ exports.uploadResume = async (req, res) => {
       });
     }
 
-    // Cleanup old resume from Cloudinary
     if (user.resumePublicId) {
       try { await cloudinary.uploader.destroy(user.resumePublicId, { resource_type: 'raw' }); } catch (_) {}
       try { await cloudinary.uploader.destroy(user.resumePublicId, { resource_type: 'image' }); } catch (_) {}
