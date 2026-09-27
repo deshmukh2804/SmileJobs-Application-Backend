@@ -1,4 +1,5 @@
 const Job = require('../models/Job');
+const User = require('../models/User');
 const { _helpers } = require('./homeController');
 const { transformJobCard, transformJobDetail, JOB_CARD_PROJECTION } = _helpers;
 
@@ -29,6 +30,21 @@ const LOCAL_COORDS = {
   'navi mumbai': { lat: 19.0330, lon: 73.0297 }, 'whitefield': { lat: 12.9698, lon: 77.7500 },
   'koramangala': { lat: 12.9352, lon: 77.6245 }, 'gachibowli': { lat: 17.4401, lon: 78.3489 },
   'madhapur': { lat: 17.4483, lon: 78.3915 }, 'hitech city': { lat: 17.4435, lon: 78.3772 },
+};
+
+const getSavedJobIds = async (req) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return [];
+    const jwt = require('jsonwebtoken');
+    const token = authHeader.split(' ')[1];
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'careerflow_secret_key_2026');
+    if (decoded && decoded.id) {
+      const user = await User.findById(decoded.id).select('savedJobs').lean();
+      return user?.savedJobs?.map(id => String(id)) || [];
+    }
+  } catch (_) {}
+  return [];
 };
 
 function distanceKm(lat1, lon1, lat2, lon2) {
@@ -74,23 +90,58 @@ function escapeRegex(str) {
   return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+exports.saveJob = async (req, res) => {
+  try {
+    const { id } = req.params;
+    await User.findByIdAndUpdate(req.user.id, { $addToSet: { savedJobs: id } });
+    res.status(200).json({ success: true, message: 'Job saved successfully' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.unsaveJob = async (req, res) => {
+  try {
+    const { id } = req.params;
+    await User.findByIdAndUpdate(req.user.id, { $pull: { savedJobs: id } });
+    res.status(200).json({ success: true, message: 'Job unsaved successfully' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+exports.getSavedJobs = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).populate({
+      path: 'savedJobs',
+      match: { status: 'Live', isActive: true }
+    }).lean();
+    const savedJobsList = Array.isArray(user?.savedJobs) ? user.savedJobs : [];
+    const savedIds = savedJobsList.map(j => String(j._id));
+    res.status(200).json({ success: true, jobs: savedJobsList.map(j => transformJobCard(j, savedIds)) });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 exports.listJobs = async (req, res) => {
   try {
     const { page, limit, skip } = parsePagination(req);
-    const filter = {};
+    const filter = { status: 'Live', isActive: true };
     if (req.query.city) filter['location.city'] = new RegExp(escapeRegex(String(req.query.city).trim()), 'i');
     if (req.query.workMode) filter.workMode = req.query.workMode;
     if (req.query.jobType) filter.jobType = req.query.jobType;
     if (req.query.featured === 'true') filter.featured = true;
 
-    const [jobs, total] = await Promise.all([
+    const [jobs, total, savedIds] = await Promise.all([
       Job.find(filter, JOB_CARD_PROJECTION).sort({ postedAt: -1, createdAt: -1 }).skip(skip).limit(limit).lean(),
       Job.countDocuments(filter),
+      getSavedJobIds(req)
     ]);
 
     res.status(200).json({
       success: true,
-      jobs: jobs.map(transformJobCard),
+      jobs: jobs.map(j => transformJobCard(j, savedIds)),
       pagination: { page, limit, total, hasMore: skip + jobs.length < total },
     });
   } catch (error) {
@@ -103,17 +154,18 @@ exports.searchJobs = async (req, res) => {
   try {
     const rawQ = (req.query.q || '').toString().trim();
     const { page, limit, skip } = parsePagination(req);
-    let filter = {};
+    let filter = { status: 'Live', isActive: true };
     if (rawQ) {
       const rx = new RegExp(escapeRegex(rawQ), 'i');
       filter.$or = [{ title: rx }, { role: rx }, { companyName: rx }, { 'location.city': rx }, { skills: rx }];
     }
-    const [jobs, total] = await Promise.all([
+    const [jobs, total, savedIds] = await Promise.all([
       Job.find(filter, JOB_CARD_PROJECTION).sort({ postedAt: -1 }).skip(skip).limit(limit).lean(),
       Job.countDocuments(filter),
+      getSavedJobIds(req)
     ]);
     res.status(200).json({
-      success: true, query: rawQ, jobs: jobs.map(transformJobCard),
+      success: true, query: rawQ, jobs: jobs.map(j => transformJobCard(j, savedIds)),
       pagination: { page, limit, total, hasMore: skip + jobs.length < total },
     });
   } catch (error) {
@@ -126,9 +178,12 @@ exports.getJobById = async (req, res) => {
   try {
     const { id } = req.params;
     if (!/^[0-9a-fA-F]{24}$/.test(id)) return res.status(400).json({ success: false, message: 'Invalid job ID' });
-    const job = await Job.findById(id).lean();
+    const [job, savedIds] = await Promise.all([
+      Job.findById(id).lean(),
+      getSavedJobIds(req)
+    ]);
     if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
-    res.status(200).json({ success: true, job: transformJobDetail(job) });
+    res.status(200).json({ success: true, job: transformJobDetail(job, savedIds) });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -141,20 +196,18 @@ exports.getNearbyJobs = async (req, res) => {
     const radiusKm = parseFloat(req.query.radius) || NEARBY_RADIUS_KM;
     const q = String(req.query.q || '').trim();
 
-    let filter = {};
+    let filter = { status: 'Live', isActive: true };
     if (q) {
       const rx = new RegExp(escapeRegex(q), 'i');
       filter.$or = [{ title: rx }, { role: rx }, { companyName: rx }, { skills: rx }];
     }
 
-    // Fetch a batch of jobs to calculate real distances
     const batchSize = Math.min(200, limit * 10);
-    const allJobs = await Job.find(filter, JOB_CARD_PROJECTION)
-      .sort({ postedAt: -1, createdAt: -1 })
-      .limit(batchSize)
-      .lean();
+    const [allJobs, savedIds] = await Promise.all([
+      Job.find(filter, JOB_CARD_PROJECTION).sort({ postedAt: -1, createdAt: -1 }).limit(batchSize).lean(),
+      getSavedJobIds(req)
+    ]);
 
-    // Calculate REAL distance for each job
     const withDistance = [];
     for (const job of allJobs) {
       const jobCoords = getJobCoords(job);
@@ -176,7 +229,6 @@ exports.getNearbyJobs = async (req, res) => {
       }
     }
 
-    // Sort by distance (closest first)
     withDistance.sort((a, b) => {
       if (a._realDistanceKm == null && b._realDistanceKm == null) return 0;
       if (a._realDistanceKm == null) return 1;
@@ -188,7 +240,7 @@ exports.getNearbyJobs = async (req, res) => {
     const paged = withDistance.slice(skip, skip + limit);
 
     const transformed = paged.map((j) => {
-      const t = transformJobCard(j);
+      const t = transformJobCard(j, savedIds);
       if (j._realDistanceKm != null) {
         const km = j._realDistanceKm;
         if (km < 1) {
@@ -223,19 +275,18 @@ exports.getOtherCityJobs = async (req, res) => {
     const radiusKm = parseFloat(req.query.radius) || NEARBY_RADIUS_KM;
     const q = String(req.query.q || '').trim();
 
-    let filter = {};
+    let filter = { status: 'Live', isActive: true };
     if (q) {
       const rx = new RegExp(escapeRegex(q), 'i');
       filter.$or = [{ title: rx }, { role: rx }, { companyName: rx }, { skills: rx }];
     }
 
     const batchSize = Math.min(200, limit * 10);
-    const allJobs = await Job.find(filter, JOB_CARD_PROJECTION)
-      .sort({ postedAt: -1, createdAt: -1 })
-      .limit(batchSize)
-      .lean();
+    const [allJobs, savedIds] = await Promise.all([
+      Job.find(filter, JOB_CARD_PROJECTION).sort({ postedAt: -1, createdAt: -1 }).limit(batchSize).lean(),
+      getSavedJobIds(req)
+    ]);
 
-    // Other cities = jobs OUTSIDE the nearby radius
     const outsideJobs = [];
     for (const job of allJobs) {
       const jobCoords = getJobCoords(job);
@@ -260,7 +311,7 @@ exports.getOtherCityJobs = async (req, res) => {
     const paged = outsideJobs.slice(skip, skip + limit);
 
     const transformed = paged.map((j) => {
-      const t = transformJobCard(j);
+      const t = transformJobCard(j, savedIds);
       if (j._realDistanceKm != null) {
         const km = j._realDistanceKm;
         t.distance = km < 1 ? `${Math.round(km * 1000)}m` : `${km.toFixed(1)} km`;

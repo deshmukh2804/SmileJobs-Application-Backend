@@ -3,20 +3,21 @@ const router = express.Router();
 const jobController = require('../controllers/jobController');
 const authMiddleware = require('../middleware/authMiddleware');
 
-// ─────────────────────────────────────────────────────────────
-// PUBLIC ENDPOINTS (No Auth required for browsing)
-// ─────────────────────────────────────────────────────────────
+// PUBLIC endpoints
 router.get('/', jobController.listJobs);
 router.get('/search', jobController.searchJobs);
 router.get('/nearby', jobController.getNearbyJobs);
 router.get('/other', jobController.getOtherCityJobs);
 
-// ─────────────────────────────────────────────────────────────
-// PROTECTED ENDPOINTS (Require active session token)
-// ─────────────────────────────────────────────────────────────
+// ✅ SAVED JOBS routes — MUST be BEFORE /:id route
+router.get('/saved', authMiddleware, jobController.getSavedJobs);
+router.post('/:id/save', authMiddleware, jobController.saveJob);
+router.delete('/:id/save', authMiddleware, jobController.unsaveJob);
+
+// Protected route
 router.get('/:id', authMiddleware, jobController.getJobById);
 
-// Admin-only utility route (requires user role check)
+// Admin utility
 router.get('/backfill-coords', authMiddleware, (req, res, next) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ success: false, message: 'Forbidden' });

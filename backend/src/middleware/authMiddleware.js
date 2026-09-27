@@ -196,7 +196,7 @@ const socketAuthMiddleware = async (socket, next) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// EXPORT COMPATIBILITY ALIASES
+// EXPORT COMPATIBILITY ALIASES (ATTACHED BEFORE module.exports)
 // ─────────────────────────────────────────────────────────────
 authMiddleware.authMiddleware = authMiddleware;
 authMiddleware.protect = authMiddleware;
@@ -208,4 +208,16 @@ authMiddleware.adminOnly = adminOnly;
 authMiddleware.adminMiddleware = adminOnly;
 authMiddleware.socketAuthMiddleware = socketAuthMiddleware;
 
+// ─────────────────────────────────────────────────────────────
+// FINAL EXPORT
+// ─────────────────────────────────────────────────────────────
 module.exports = authMiddleware;
+module.exports.authMiddleware = authMiddleware;
+module.exports.protect = authMiddleware;
+module.exports.verifyToken = authMiddleware;
+module.exports.authenticate = authMiddleware;
+module.exports.requireAuth = authMiddleware;
+module.exports.optionalAuth = optionalAuth;
+module.exports.adminOnly = adminOnly;
+module.exports.adminMiddleware = adminOnly;
+module.exports.socketAuthMiddleware = socketAuthMiddleware;

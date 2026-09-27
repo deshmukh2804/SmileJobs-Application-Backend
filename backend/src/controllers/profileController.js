@@ -1,4 +1,5 @@
 const User = require('../models/User');
+const Notification = require('../models/Notification');
 const cloudinary = require('../config/cloudinary');
 
 const uniq = (arr) =>
@@ -24,12 +25,11 @@ function getResumeProxyUrl(user, req) {
 }
 
 // ─────────────────────────────────────────────
-// GET /api/profile/me
+// GET /api/profile/me (THIS WAS MISSING)
 // ─────────────────────────────────────────────
 exports.getMyProfile = async (req, res) => {
   try {
-    // Identity Enforcement: Derive query exclusively from the securely verified JWT ID
-    const user = await User.findById(req.user.id, PROFILE_PROJECTION).lean();
+    const user = await User.findById(req.user.id).select(PROFILE_PROJECTION).lean();
     if (!user) {
       return res.status(404).json({
         success: false,
@@ -38,35 +38,81 @@ exports.getMyProfile = async (req, res) => {
       });
     }
 
-    user.skills = uniq(user.skills);
-    user.knownLanguages = uniq(user.knownLanguages);
-    user.assets = uniq(user.assets);
-    user.certifications = uniq(user.certifications);
-
     if (user.resumeUrl || user.resumePublicId) {
       user.resumeUrl = getResumeProxyUrl(user, req);
     }
 
-    // ✅ FIX: Absolute Cache Invalidation to prevent shared-device profile hijacking
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-
-    res.status(200).json({ success: true, data: user });
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    return res.status(200).json({
+      success: true,
+      data: user,
+    });
   } catch (error) {
-    console.error('[profile.getMe] error:', error);
-    res.status(500).json({
+    console.error('[profile.getMyProfile] error:', error);
+    return res.status(500).json({
       success: false,
       message: error.message,
       code: 'PROFILE_FETCH_ERROR',
-      requestId: req.id,
     });
   }
 };
 
 // ─────────────────────────────────────────────
-// PUT /api/profile/me
+// GET /api/profile/notifications
 // ─────────────────────────────────────────────
+exports.getMyNotifications = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    console.log(`🔔 [Notifications] Fetching for user: ${userId}`);
+
+    const user = await User.findById(userId).lean();
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found', data: [] });
+    }
+
+    const orConditions = [
+      { targetAudience: 'all' },
+      { targetAudience: { $in: ['candidates', 'job_seeker', 'job_seekers'] } },
+      { targetUserIds: userId },
+    ];
+
+    if (user.city) {
+      orConditions.push({
+        targetAudience: 'city',
+        targetCity: new RegExp(`^${user.city}$`, 'i')
+      });
+    }
+
+    if (Array.isArray(user.skills) && user.skills.length > 0) {
+      orConditions.push({
+        targetAudience: 'skills',
+        'filters.skills': { $in: user.skills }
+      });
+    }
+
+    const notifications = await Notification.find({ $or: orConditions })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+
+    res.status(200).json({
+      success: true,
+      count: notifications.length,
+      data: notifications,
+    });
+  } catch (error) {
+    console.error('[profile.getNotifications] error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message,
+      data: [],
+    });
+  }
+};
+
 exports.updateMyProfile = async (req, res) => {
   try {
     const allowed = [
@@ -87,7 +133,6 @@ exports.updateMyProfile = async (req, res) => {
       });
     }
 
-    // Normalize phone number input values explicitly
     if (req.body.phoneNumber || req.body.phone) {
       const phoneNumberVal = String(req.body.phoneNumber || req.body.phone).trim();
       if (phoneNumberVal) {
@@ -123,7 +168,6 @@ exports.updateMyProfile = async (req, res) => {
       data.resumeUrl = getResumeProxyUrl(data, req);
     }
 
-    // Force absolute cache control on profile changes as well
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
@@ -140,9 +184,6 @@ exports.updateMyProfile = async (req, res) => {
   }
 };
 
-// ─────────────────────────────────────────────
-// POST /api/profile/upload-avatar
-// ─────────────────────────────────────────────
 exports.uploadAvatar = async (req, res) => {
   try {
     let avatarUrl = '';
@@ -200,9 +241,6 @@ exports.uploadAvatar = async (req, res) => {
   }
 };
 
-// ─────────────────────────────────────────────
-// POST /api/profile/upload-resume
-// ─────────────────────────────────────────────
 exports.uploadResume = async (req, res) => {
   try {
     let resumeUrl = '';
@@ -256,8 +294,6 @@ exports.uploadResume = async (req, res) => {
     user.resumePublicId = resumePublicId;
     await user.save();
 
-    console.log(`[ResumeUpload] ✅ Saved resume for ${user._id}: ${resumeUrl}`);
-
     const proxyViewUrl = getResumeProxyUrl(user, req);
 
     res.status(200).json({
@@ -280,9 +316,6 @@ exports.uploadResume = async (req, res) => {
   }
 };
 
-// ─────────────────────────────────────────────
-// GET /api/profile/resume/view/:userId?
-// ─────────────────────────────────────────────
 exports.viewResume = async (req, res) => {
   try {
     const userId = req.params.userId || req.user?.id;
@@ -371,9 +404,6 @@ exports.viewResume = async (req, res) => {
   }
 };
 
-// ─────────────────────────────────────────────
-// GET /api/profile/resume/download/:userId?
-// ─────────────────────────────────────────────
 exports.downloadResume = async (req, res) => {
   try {
     const userId = req.params.userId || req.user?.id;
@@ -429,9 +459,6 @@ exports.downloadResume = async (req, res) => {
   }
 };
 
-// ─────────────────────────────────────────────
-// GET /api/profile/all (recruiter-facing list)
-// ─────────────────────────────────────────────
 exports.getAllProfiles = async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page) || 1);

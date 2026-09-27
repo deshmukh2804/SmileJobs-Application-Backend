@@ -18,9 +18,10 @@ const activeBannerFilter = (placement = 'home_hero') => {
   return {
     placement,
     isActive: true,
-    status: { $in: ['active', 'Active', 'published', 'Published', 'live', 'Live'] },
-    targetAudience: { $in: ['candidates', 'all', 'both', 'everyone'] },
-    platform: { $in: ['mobile', 'both', 'all', 'android', 'ios'] },
+    $or: [
+      { status: { $exists: false } },
+      { status: { $in: ['active', 'Active', 'published', 'Published', 'live', 'Live', ''] } }
+    ],
     $and: [
       { $or: [{ startDate: { $lte: now } }, { startDate: null }, { startDate: { $exists: false } }] },
       { $or: [{ endDate: { $gte: now } }, { endDate: null }, { endDate: { $exists: false } }] },
@@ -28,12 +29,10 @@ const activeBannerFilter = (placement = 'home_hero') => {
   };
 };
 
-// ✅ ULTRA-RESILIENT live filter — catches ALL possible job status values in your Job_db
 const liveJobFilter = () => {
-  return {};
+  return { status: 'Live', isActive: true };
 };
 
-// ✅ CLEAN PROJECTION — no nested path collisions
 const JOB_CARD_PROJECTION = {
   title: 1,
   companyName: 1,
@@ -99,15 +98,22 @@ function formatExperience(exp) {
 
 const BG_PALETTE = ['#E0D4FC', '#FDE8D4', '#D4F5E9', '#FCE0E9', '#D4E9FC', '#F5E9D4'];
 
-const transformJobCard = (job) => {
+const transformJobCard = (job, savedIds = []) => {
   if (!job) return null;
   const j = job.toObject ? job.toObject() : job;
   const salaryStr = formatSalary(j.salary);
   const experienceStr = formatExperience(j.experience);
+  
   const cityOnly = j.location?.city || j.location?.state || 'Remote';
-  const fullLocation = j.location
-    ? [j.location.city, j.location.state].filter(Boolean).join(', ') || 'Remote'
-    : 'Remote';
+  
+  const addressParts = [
+    j.location?.address,
+    j.location?.subLocation || j.location?.area || j.location?.locality,
+    j.location?.city,
+    j.location?.state
+  ].filter(part => part && typeof part === 'string' && part.trim() !== '');
+
+  const fullLocation = addressParts.length > 0 ? addressParts.join(', ') : 'Remote';
   const companyName = j.companyName || 'Company';
   const companyInitial = (j.companyInitials || companyName.charAt(0) || 'C').toUpperCase();
   const bgIdx = (companyName.length || 0) % BG_PALETTE.length;
@@ -139,13 +145,13 @@ const transformJobCard = (job) => {
         : undefined,
     featured: !!j.featured,
     isNew: !!j.isNew,
-    isSaved: false,
+    isSaved: savedIds.includes(String(j._id)),
   };
 };
 
-const transformJobDetail = (job) => {
+const transformJobDetail = (job, savedIds = []) => {
   if (!job) return null;
-  const card = transformJobCard(job);
+  const card = transformJobCard(job, savedIds);
   if (!card) return null;
   const j = job.toObject ? job.toObject() : job;
   const companyGallery = Array.isArray(j.companyImages)
@@ -227,7 +233,6 @@ const DEFAULT_HOME_SECTIONS = [
   { type: 'eventBanner', sectionKey: 'eventBanner', enabled: true, order: 5 },
   { type: 'jobs', sectionKey: 'recommendedJobs', title: 'Recommended Jobs', enabled: true, order: 6, limit: 20 },
   { type: 'featuredJob', sectionKey: 'featuredJob', enabled: true, order: 7, limit: 1 },
-  { type: 'careerTip', sectionKey: 'careerTip', enabled: true, order: 8 },
 ];
 
 const DEFAULT_BOTTOM_NAV = {
@@ -264,11 +269,35 @@ async function getHomeSectionsFromDB() {
 exports.getHomeConfig = async (req, res) => {
   try {
     const { sections: sectionsRaw, version } = await getHomeSectionsFromDB();
-    const sections = [...sectionsRaw].filter((s) => s.enabled !== false).sort((a, b) => (a.order || 0) - (b.order || 0));
-    const [liveJobs, activeBanners] = await Promise.all([
-      Job.countDocuments({}).catch(() => 0),
+    const sections = [...sectionsRaw].filter((s) => s.enabled !== false && s.type !== 'careerTip').sort((a, b) => (a.order || 0) - (b.order || 0));
+
+    const [liveJobs, activeBanners, activeCategories] = await Promise.all([
+      Job.countDocuments(liveJobFilter()).catch(() => 0),
       Banner.countDocuments(activeBannerFilter('home_hero')).catch(() => 0),
+      Job.aggregate([
+        { $match: { status: 'Live', isActive: true } },
+        { $group: { _id: { $trim: { input: { $toLower: '$category' } } }, original: { $first: '$category' } } },
+        { $match: { _id: { $ne: null, $ne: '' } } },
+        { $limit: 12 }
+      ]).catch(() => [])
     ]);
+
+    const popularCategoriesList = activeCategories.map(c => c.original).filter(Boolean);
+
+    const jwt = require('jsonwebtoken');
+    let savedIds = [];
+    try {
+      const authHeader = req.headers.authorization;
+      if (authHeader) {
+        const token = authHeader.split(' ')[1];
+        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'careerflow_secret_key_2026');
+        if (decoded && decoded.id) {
+          const User = require('../models/User');
+          const user = await User.findById(decoded.id).select('savedJobs').lean();
+          savedIds = user?.savedJobs?.map(id => String(id)) || [];
+        }
+      }
+    } catch (_) {}
 
     const results = await Promise.all(
       sections.map(async (section) => {
@@ -279,13 +308,13 @@ exports.getHomeConfig = async (req, res) => {
             return { type: 'heroBanner', sectionKey: section.sectionKey || 'heroBanner', enabled: true, order: section.order, items: banners.map(transformBanner) };
           }
           if (section.type === 'jobs') {
-            const jobs = await Job.find({}, JOB_CARD_PROJECTION).sort({ postedAt: -1, createdAt: -1 }).limit(section.limit || 20).lean();
-            return { type: 'jobs', sectionKey: section.sectionKey, title: section.title || 'Jobs', enabled: true, order: section.order, items: jobs.map(transformJobCard) };
+            const jobs = await Job.find(liveJobFilter(), JOB_CARD_PROJECTION).sort({ postedAt: -1, createdAt: -1 }).limit(section.limit || 20).lean();
+            return { type: 'jobs', sectionKey: section.sectionKey, title: section.title || 'Jobs', enabled: true, order: section.order, items: jobs.map(j => transformJobCard(j, savedIds)) };
           }
           if (section.type === 'featuredJob') {
-            let job = await Job.findOne({ featured: true }, JOB_CARD_PROJECTION).sort({ priority: -1, postedAt: -1 }).lean();
-            if (!job) job = await Job.findOne({}, JOB_CARD_PROJECTION).sort({ postedAt: -1 }).lean();
-            return { type: 'featuredJob', sectionKey: section.sectionKey || 'featuredJob', enabled: true, order: section.order, items: job ? [transformJobCard(job)] : [] };
+            let job = await Job.findOne({ featured: true, status: 'Live', isActive: true }, JOB_CARD_PROJECTION).sort({ priority: -1, postedAt: -1 }).lean();
+            if (!job) job = await Job.findOne({ status: 'Live', isActive: true }, JOB_CARD_PROJECTION).sort({ postedAt: -1 }).lean();
+            return { type: 'featuredJob', sectionKey: section.sectionKey || 'featuredJob', enabled: true, order: section.order, items: job ? [transformJobCard(job, savedIds)] : [] };
           }
           return { type: section.type, sectionKey: section.sectionKey || section.type, enabled: true, order: section.order, config: section.config || {} };
         } catch (err) {
@@ -297,7 +326,12 @@ exports.getHomeConfig = async (req, res) => {
     const bottomNav = await getBottomNavFromDB();
     res.status(200).json({
       success: true, version, screen: 'home', sections: results, bottomNav,
-      meta: { activeJobsCount: liveJobs, activeBannersCount: activeBanners, serverTime: new Date().toISOString() },
+      meta: { 
+        activeJobsCount: liveJobs, 
+        activeBannersCount: activeBanners, 
+        popularCategories: popularCategoriesList,
+        serverTime: new Date().toISOString() 
+      },
     });
   } catch (error) {
     console.error('❌ getHomeConfig error:', error);

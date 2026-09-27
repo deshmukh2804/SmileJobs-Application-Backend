@@ -1,7 +1,6 @@
 const mongoose = require('mongoose');
 const { careerflowAdminDbConnection } = require('../config/db');
 
-// ── FCM Token Subschema ──
 const fcmTokenSchema = new mongoose.Schema(
   {
     token: { type: String, required: true, trim: true },
@@ -15,9 +14,8 @@ const fcmTokenSchema = new mongoose.Schema(
 
 const userSchema = new mongoose.Schema(
   {
-    // ── Auth Identifiers ──
     phoneNumber: { type: String, trim: true },
-    phone: { type: String, trim: true }, // phone alias
+    phone: { type: String, trim: true }, 
     googleId: { type: String, trim: true },
     authProvider: {
       type: String,
@@ -32,13 +30,11 @@ const userSchema = new mongoose.Schema(
     },
     lastLogin: { type: Date },
 
-    // Personal
     name: { type: String, default: '' },
     email: { type: String, default: '', trim: true, lowercase: true },
     gender: { type: String, default: '' },
     birthday: { type: String, default: '' },
 
-    // Canonical Location
     city: { type: String, default: '' },
     subLocation: { type: String, default: '' },
     state: { type: String, default: '' },
@@ -50,14 +46,11 @@ const userSchema = new mongoose.Schema(
 
     avatarUrl: { type: String, default: '' },
 
-    // Languages
     englishLevel: { type: String, default: '' },
     knownLanguages: { type: [String], default: [] },
 
-    // About
     aboutMe: { type: String, default: '' },
 
-    // Experience
     totalExperience: { type: String, default: '' },
     experienceLevel: { type: String, default: '' },
     workType: { type: String, default: '' },
@@ -67,35 +60,31 @@ const userSchema = new mongoose.Schema(
     startDate: { type: String, default: '' },
     jobTitle: { type: String, default: '' },
 
-    // Skills & Assets
     skills: { type: [String], default: [] },
     assets: { type: [String], default: [] },
 
-    // Education
     collegeName: { type: String, default: '' },
     degree: { type: String, default: '' },
     endYear: { type: String, default: '' },
     specialization: { type: String, default: '' },
 
-    // Certifications
     certifications: { type: [String], default: [] },
 
-    // Resume
     resumeUrl: { type: String, default: '' },
     resumeFileName: { type: String, default: '' },
     resumePublicId: { type: String, default: '' },
 
-    // Completion
     profileCompletion: { type: Number, default: 0 },
     isVisibleToRecruiters: { type: Boolean, default: true },
 
-    // FCM Push Notification Tokens
     fcmTokens: { type: [fcmTokenSchema], default: [] },
+
+    // Dynamic relationship references for global Bookmarks synchronization
+    savedJobs: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Job' }]
   },
   { timestamps: true }
 );
 
-// ── Partial Unique Indexes ──
 userSchema.index(
   { phoneNumber: 1 },
   { unique: true, partialFilterExpression: { phoneNumber: { $type: 'string', $gt: '' } } }
@@ -114,7 +103,6 @@ userSchema.index(
 userSchema.index({ 'fcmTokens.token': 1 });
 
 userSchema.pre('save', function (next) {
-  // Safe Cleanup: Prevent index collisions by setting empty values to undefined
   if (this.email) {
     this.email = this.email.trim().toLowerCase();
     if (this.email === '') {
@@ -143,11 +131,9 @@ userSchema.pre('save', function (next) {
     }
   }
 
-  // Synchronize phone fields
   if (this.phoneNumber && !this.phone) this.phone = this.phoneNumber;
   if (this.phone && !this.phoneNumber) this.phoneNumber = this.phone;
 
-  // Score completion check
   let score = 0;
   const checks = [
     this.name, (this.phoneNumber || this.phone), this.email, this.gender, this.birthday, this.city,
@@ -162,4 +148,4 @@ userSchema.pre('save', function (next) {
   next();
 });
 
-module.exports = careerflowAdminDbConnection.model('User', userSchema);
+module.exports = careerflowAdminDbConnection.models.User || careerflowAdminDbConnection.model('User', userSchema);
