@@ -25,7 +25,7 @@ function getResumeProxyUrl(user, req) {
 }
 
 // ─────────────────────────────────────────────
-// GET /api/profile/me (THIS WAS MISSING)
+// GET /api/profile/me
 // ─────────────────────────────────────────────
 exports.getMyProfile = async (req, res) => {
   try {
@@ -108,6 +108,100 @@ exports.getMyNotifications = async (req, res) => {
     res.status(500).json({
       success: false,
       message: error.message,
+      data: [],
+    });
+  }
+};
+
+// ─────────────────────────────────────────────
+// ✅ NEW: GET /api/profile/saved-jobs
+// Fetches all jobs saved/bookmarked by the current user.
+// ─────────────────────────────────────────────
+exports.getSavedJobs = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    console.log(`💾 [SavedJobs] Fetching for user: ${userId}`);
+
+    // Try to lazy-load the Job model — it might live in the jobs microservice
+    let Job;
+    try {
+      Job = require('../models/Job');
+    } catch (_) {
+      try {
+        Job = require('../models/job');
+      } catch (_) {
+        try {
+          Job = require('../../job-service/models/Job');
+        } catch (_) {
+          console.warn('⚠️ [SavedJobs] Job model not resolvable — returning empty array.');
+          return res.status(200).json({
+            success: true,
+            count: 0,
+            data: [],
+          });
+        }
+      }
+    }
+
+    // Load user with saved-job identifiers (support multiple naming conventions)
+    const user = await User.findById(userId)
+      .select('savedJobs bookmarks bookmarkedJobs')
+      .lean();
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found',
+        data: [],
+      });
+    }
+
+    // Merge and deduplicate all possible saved-job field names
+    const savedJobIds = [
+      ...(Array.isArray(user.savedJobs) ? user.savedJobs : []),
+      ...(Array.isArray(user.bookmarks) ? user.bookmarks : []),
+      ...(Array.isArray(user.bookmarkedJobs) ? user.bookmarkedJobs : []),
+    ]
+      .filter(Boolean)
+      .map((id) => String(id));
+
+    const uniqueIds = [...new Set(savedJobIds)];
+
+    if (uniqueIds.length === 0) {
+      console.log(`💾 [SavedJobs] No saved jobs for user ${userId}`);
+      return res.status(200).json({
+        success: true,
+        count: 0,
+        data: [],
+      });
+    }
+
+    // Fetch full job documents by ID
+    const jobs = await Job.find({ _id: { $in: uniqueIds } })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    // Enrich with `isSaved: true` (used by mobile UI)
+    const enriched = jobs.map((j) => ({
+      ...j,
+      id: String(j._id),
+      isSaved: true,
+    }));
+
+    console.log(`💾 [SavedJobs] Returned ${enriched.length} jobs`);
+
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    return res.status(200).json({
+      success: true,
+      count: enriched.length,
+      data: enriched,
+    });
+  } catch (error) {
+    console.error('[profile.getSavedJobs] error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+      code: 'SAVED_JOBS_FETCH_ERROR',
       data: [],
     });
   }
