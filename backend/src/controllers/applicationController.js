@@ -2,6 +2,9 @@ const Application = require('../models/Application');
 const Job = require('../models/Job');
 const User = require('../models/User');
 
+// ═══════════════════════════════════════════════════════════════
+// HELPER: Calculate skill match percentage
+// ═══════════════════════════════════════════════════════════════
 function calculateMatch(jobSkills, userSkills) {
   if (!jobSkills || !jobSkills.length) return 60;
   const jLower = jobSkills.map((s) => String(s).toLowerCase().trim());
@@ -10,9 +13,229 @@ function calculateMatch(jobSkills, userSkills) {
   return Math.round((matched / jLower.length) * 100);
 }
 
-// ─────────────────────────────────────────────
-// POST /api/v1/applications
-// ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// HELPER: Get status display config
+// ═══════════════════════════════════════════════════════════════
+function getStatusBadge(status) {
+  const badgeMap = {
+    Applied: { text: 'Applied Successfully', isHighlighted: false, category: 'pending' },
+    Viewed: { text: 'HR Viewed Profile', isHighlighted: false, category: 'pending' },
+    Shortlisted: { text: 'Shortlisted', isHighlighted: true, category: 'hr-responded' },
+    Interview: { text: 'Interview Scheduled', isHighlighted: true, category: 'hr-responded' },
+    Offered: { text: 'Offer Received', isHighlighted: true, category: 'offers' },
+    Hired: { text: 'Hired - Congratulations!', isHighlighted: true, category: 'offers' },
+    Rejected: { text: 'Not Selected', isHighlighted: false, category: 'expired' },
+    Withdrawn: { text: 'Withdrawn', isHighlighted: false, category: 'expired' },
+  };
+  return badgeMap[status] || { text: 'In Pipeline', isHighlighted: false, category: 'pending' };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// HELPER: Build dynamic milestones based on current status
+// Reflects real-time progress from admin/recruiter panel
+// ═══════════════════════════════════════════════════════════════
+function buildMilestones(app) {
+  const status = app.status;
+  const isTerminal = ['Rejected', 'Withdrawn'].includes(status);
+
+  // Base workflow stages
+  const stages = [
+    {
+      key: 'Applied',
+      title: 'Application Submitted',
+      time: app.appliedAt ? formatDate(app.appliedAt) : 'Just now',
+    },
+    {
+      key: 'Viewed',
+      title: 'HR Viewed Your Profile',
+      time: app.viewedAt ? formatDate(app.viewedAt) : null,
+    },
+    {
+      key: 'Shortlisted',
+      title: 'Shortlisted for Next Round',
+      time: app.shortlistedAt ? formatDate(app.shortlistedAt) : null,
+    },
+    {
+      key: 'Interview',
+      title: 'Interview Scheduled',
+      time: app.interviewAt ? formatDate(app.interviewAt) : null,
+    },
+    {
+      key: 'Offered',
+      title: 'Offer Extended',
+      time: app.offeredAt ? formatDate(app.offeredAt) : null,
+    },
+    {
+      key: 'Hired',
+      title: 'Successfully Hired',
+      time: app.hiredAt ? formatDate(app.hiredAt) : null,
+    },
+  ];
+
+  const stageOrder = ['Applied', 'Viewed', 'Shortlisted', 'Interview', 'Offered', 'Hired'];
+  const currentIndex = stageOrder.indexOf(status);
+
+  // If rejected/withdrawn, mark only completed stages up to that point
+  if (isTerminal) {
+    const milestones = stages.map((stage, idx) => {
+      const stageIdx = stageOrder.indexOf(stage.key);
+      // Mark stages completed based on the timestamps
+      const wasCompleted =
+        stage.key === 'Applied' ||
+        (stage.key === 'Viewed' && app.viewedAt) ||
+        (stage.key === 'Shortlisted' && app.shortlistedAt) ||
+        (stage.key === 'Interview' && app.interviewAt) ||
+        (stage.key === 'Offered' && app.offeredAt);
+      return {
+        title: stage.title,
+        time: stage.time || '',
+        completed: !!wasCompleted,
+        statusText: '',
+        isHighlight: false,
+      };
+    });
+
+    // Add rejection/withdrawal milestone
+    milestones.push({
+      title: status === 'Rejected' ? 'Application Not Selected' : 'Application Withdrawn',
+      time: app.updatedAt ? formatDate(app.updatedAt) : '',
+      completed: true,
+      statusText: '',
+      isHighlight: false,
+    });
+    return milestones;
+  }
+
+  // Normal flow — mark stages up to and including current as completed
+  return stages.map((stage, idx) => {
+    const stageIdx = stageOrder.indexOf(stage.key);
+    const isCompleted = stageIdx <= currentIndex;
+    const isCurrent = stageIdx === currentIndex;
+
+    return {
+      title: stage.title,
+      time: stage.time || (isCompleted ? '' : ''),
+      completed: isCompleted,
+      statusText: isCurrent ? 'Current Stage' : '',
+      isHighlight: isCurrent,
+    };
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// HELPER: Format date for display
+// ═══════════════════════════════════════════════════════════════
+function formatDate(date) {
+  if (!date) return '';
+  const d = new Date(date);
+  const now = new Date();
+  const diffMs = now - d;
+  const diffMin = Math.floor(diffMs / (1000 * 60));
+  const diffHr = Math.floor(diffMs / (1000 * 60 * 60));
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+  if (diffMin < 1) return 'Just now';
+  if (diffMin < 60) return `${diffMin} min ago`;
+  if (diffHr < 24) return `${diffHr}h ago`;
+  if (diffDays === 1) return 'Yesterday';
+  if (diffDays < 7) return `${diffDays} days ago`;
+
+  return d.toLocaleDateString('en-IN', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// HELPER: Extract initials from name
+// ═══════════════════════════════════════════════════════════════
+function getInitials(name) {
+  if (!name) return 'HR';
+  return String(name)
+    .split(' ')
+    .filter(Boolean)
+    .map((s) => s[0])
+    .slice(0, 2)
+    .join('')
+    .toUpperCase();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// HELPER: Transform application document to mobile-friendly format
+// Fetches LATEST job data to reflect real-time recruiter settings
+// ═══════════════════════════════════════════════════════════════
+async function transformApplication(app) {
+  // Fetch latest job data (to get real-time contact visibility settings)
+  let latestJob = null;
+  try {
+    latestJob = await Job.findById(app.jobId).lean();
+  } catch (err) {
+    console.log('[TRANSFORM] Could not fetch latest job:', err.message);
+  }
+
+  // Determine contact visibility from LIVE job data (fallback to snapshot)
+  const contactVisibility = latestJob?.contactVisibility || { whatsapp: true, mobile: true };
+  const whatsappContactEnabled = latestJob?.whatsappContactEnabled !== false;
+
+  // Get status badge & category (auto-computed based on current status)
+  const badge = getStatusBadge(app.status);
+
+  // Build dynamic milestones based on real-time status
+  const milestones = buildMilestones(app);
+
+  // Get latest HR contact info from job (in case recruiter updated it)
+  const hrName = latestJob?.contactPerson?.name || app.jobHrName || 'HR Team';
+  const hrRole = latestJob?.contactPerson?.designation || app.jobHrRole || 'Recruiter';
+  const hrPhone = latestJob?.recruiterMobileNumber || app.jobHrPhone || '';
+  const hrWhatsapp = latestJob?.recruiterWhatsappNumber || app.jobHrWhatsapp || '';
+
+  // ✅ Contact permissions from LIVE job settings
+  // Recruiter can toggle these anytime from their panel
+  const phoneEnabled = contactVisibility.mobile !== false && !!hrPhone;
+  const whatsappEnabled =
+    contactVisibility.whatsapp !== false &&
+    whatsappContactEnabled &&
+    !!(hrWhatsapp || hrPhone);
+
+  return {
+    id: String(app._id),
+    jobId: String(app.jobId),
+    jobTitle: app.jobTitle,
+    company: app.jobCompany,
+    companyLogoBg: '#E0D4FC',
+    companyLogoText: (app.jobCompany || 'C').charAt(0).toUpperCase(),
+    companyLogoUrl: latestJob?.companyLogo?.url || app.jobCompanyLogo || '',
+    salary: app.jobSalary,
+    location: app.jobLocation,
+    distance: '',
+    category: badge.category,
+    matchPercentage: app.matchPercentage,
+    status: app.status,
+    statusBadge: {
+      text: badge.text,
+      isHighlighted: badge.isHighlighted,
+    },
+    milestones,
+    hrContact: {
+      name: hrName,
+      role: hrRole,
+      initials: getInitials(hrName),
+      phone: hrPhone,
+      whatsapp: hrWhatsapp || hrPhone,
+      whatsappEnabled,   // ✅ Real-time from job settings
+      phoneEnabled,      // ✅ Real-time from job settings
+      expectedReply: 'Application received. Expected reply within 24h',
+    },
+    hrNotes: app.hrNotes || '',
+    appliedAt: app.appliedAt,
+    updatedAt: app.updatedAt,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// POST /api/v1/applications — Apply to a job
+// ═══════════════════════════════════════════════════════════════
 exports.applyToJob = async (req, res) => {
   console.log('\n========== APPLY TO JOB REQUEST ==========');
   console.log('[APPLY] User ID from token:', req.user?.id);
@@ -184,69 +407,30 @@ exports.applyToJob = async (req, res) => {
   }
 };
 
-// ─────────────────────────────────────────────
-// GET /api/v1/applications/my
-// ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// GET /api/v1/applications/my — Get my applications
+// ✅ NOW SYNCS WITH ADMIN/RECRUITER STATUS CHANGES IN REAL-TIME
+// ═══════════════════════════════════════════════════════════════
 exports.getMyApplications = async (req, res) => {
   console.log('\n[MY-APPS] Fetching applications for user:', req.user?.id);
 
   try {
     const userId = req.user.id;
 
+    // Fetch FRESH data from DB (no cache) — this ensures admin/recruiter
+    // status changes appear immediately on next fetch
     const applications = await Application.find({ userId })
       .sort({ appliedAt: -1 })
       .lean();
 
     console.log('[MY-APPS] Found', applications.length, 'applications');
 
-    const transformed = applications.map((app) => ({
-      id: String(app._id),
-      jobId: String(app.jobId),
-      jobTitle: app.jobTitle,
-      company: app.jobCompany,
-      companyLogoBg: '#E0D4FC',
-      companyLogoText: (app.jobCompany || 'C').charAt(0).toUpperCase(),
-      companyLogoUrl: app.jobCompanyLogo || '',
-      salary: app.jobSalary,
-      location: app.jobLocation,
-      distance: '',
-      category: app.category,
-      matchPercentage: app.matchPercentage,
-      status: app.status,
-      statusBadge: {
-        text:
-          app.status === 'Applied'
-            ? 'Applied Successfully'
-            : app.status === 'Viewed'
-            ? 'HR Viewed'
-            : app.status === 'Shortlisted'
-            ? 'Shortlisted'
-            : app.status === 'Interview'
-            ? 'Interview Scheduled'
-            : app.status === 'Offered'
-            ? 'Offer Received'
-            : app.status === 'Rejected'
-            ? 'Not Selected'
-            : 'In Pipeline',
-        isHighlighted: ['Shortlisted', 'Interview', 'Offered'].includes(app.status),
-      },
-      milestones: app.milestones || [],
-      hrContact: {
-        name: app.jobHrName || 'HR Team',
-        role: app.jobHrRole || 'Recruiter',
-        initials: (app.jobHrName || 'HR')
-          .split(' ')
-          .map((s) => s[0])
-          .slice(0, 2)
-          .join('')
-          .toUpperCase(),
-        phone: app.jobHrPhone || '',
-        whatsapp: app.jobHrWhatsapp || '',
-        expectedReply: 'Application received. Expected reply within 24h',
-      },
-      appliedAt: app.appliedAt,
-    }));
+    // Transform each application (fetches latest job data for real-time contact settings)
+    const transformed = await Promise.all(
+      applications.map((app) => transformApplication(app))
+    );
 
+    // Recompute counts based on latest categories (auto-updated by status)
     const counts = {
       all: transformed.length,
       pending: transformed.filter((a) => a.category === 'pending').length,
@@ -256,20 +440,54 @@ exports.getMyApplications = async (req, res) => {
 
     console.log('[MY-APPS] Counts:', JSON.stringify(counts));
 
+    // Send with cache-control headers to prevent stale data
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+
     res.status(200).json({
       success: true,
       applications: transformed,
       counts,
+      timestamp: Date.now(), // helps client detect fresh data
     });
   } catch (error) {
     console.log('[MY-APPS] ERROR:', error.message);
+    console.log('[MY-APPS] Stack:', error.stack);
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// GET /api/v1/applications/:id — Get single application (with latest status)
+// ═══════════════════════════════════════════════════════════════
+exports.getApplicationById = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { id } = req.params;
+
+    const app = await Application.findOne({ _id: id, userId }).lean();
+    if (!app) {
+      return res.status(404).json({ success: false, message: 'Application not found' });
+    }
+
+    const transformed = await transformApplication(app);
+
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.status(200).json({
+      success: true,
+      application: transformed,
+      timestamp: Date.now(),
+    });
+  } catch (error) {
+    console.log('[GET-APP] ERROR:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════
 // GET /api/v1/applications/check/:jobId
-// ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
 exports.checkApplied = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -287,10 +505,9 @@ exports.checkApplied = async (req, res) => {
   }
 };
 
-// ─────────────────────────────────────────────
-// GET /api/v1/applications/debug
-// Debug endpoint to see ALL applications in DB
-// ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// GET /api/v1/applications/debug — Debug (dev use only)
+// ═══════════════════════════════════════════════════════════════
 exports.debugApplications = async (req, res) => {
   try {
     const total = await Application.countDocuments({});
@@ -316,9 +533,9 @@ exports.debugApplications = async (req, res) => {
   }
 };
 
-// ─────────────────────────────────────────────
-// DELETE /api/v1/applications/:id
-// ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// DELETE /api/v1/applications/:id — Withdraw application
+// ═══════════════════════════════════════════════════════════════
 exports.withdrawApplication = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -330,6 +547,7 @@ exports.withdrawApplication = async (req, res) => {
     }
 
     app.status = 'Withdrawn';
+    app.category = 'expired';
     await app.save();
 
     await Job.findByIdAndUpdate(app.jobId, { $inc: { applicantsCount: -1 } });

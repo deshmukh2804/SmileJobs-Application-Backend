@@ -3,6 +3,7 @@ const router = express.Router();
 const {
   applyToJob,
   getMyApplications,
+  getApplicationById,
   checkApplied,
   debugApplications,
   withdrawApplication,
@@ -16,6 +17,7 @@ router.get('/debug', debugApplications);
 router.post('/', protect, applyToJob);
 router.get('/my', protect, getMyApplications);
 router.get('/check/:jobId', protect, checkApplied);
+router.get('/:id', protect, getApplicationById); // ✅ NEW: Get single application
 router.delete('/:id', protect, withdrawApplication);
 
 module.exports = router;

@@ -1,5 +1,5 @@
 const mongoose = require('mongoose');
-const { applicationDbConnection } = require('../config/db'); // Import application_db connection
+const { applicationDbConnection } = require('../config/db');
 
 const applicationSchema = new mongoose.Schema(
   {
@@ -58,7 +58,7 @@ const applicationSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: ['Applied', 'Viewed', 'Shortlisted', 'Interview', 'Offered', 'Rejected', 'Withdrawn'],
+      enum: ['Applied', 'Viewed', 'Shortlisted', 'Interview', 'Offered', 'Hired', 'Rejected', 'Withdrawn'],
       default: 'Applied',
     },
     category: {
@@ -82,10 +82,16 @@ const applicationSchema = new mongoose.Schema(
       default: [],
     },
 
+    // ✅ STATUS TIMESTAMPS — Updated by admin/recruiter panel to track when each stage happened
+    // Mobile app uses these to display accurate timeline
     appliedAt: { type: Date, default: Date.now },
     viewedAt: { type: Date },
     shortlistedAt: { type: Date },
     interviewAt: { type: Date },
+    offeredAt: { type: Date },
+    hiredAt: { type: Date },
+    rejectedAt: { type: Date },
+    withdrawnAt: { type: Date },
   },
   {
     timestamps: true,
@@ -95,8 +101,89 @@ const applicationSchema = new mongoose.Schema(
 
 applicationSchema.index({ jobId: 1, userId: 1 }, { unique: true });
 applicationSchema.index({ userId: 1, appliedAt: -1 });
+applicationSchema.index({ userId: 1, status: 1 });
+applicationSchema.index({ status: 1, updatedAt: -1 });
 
-// Compile Application schema onto application_db connection
+// ═══════════════════════════════════════════════════════════════
+// AUTO-UPDATE STATUS TIMESTAMPS ON STATUS CHANGE
+// This runs when admin/recruiter updates status via their panel
+// ═══════════════════════════════════════════════════════════════
+applicationSchema.pre('save', function (next) {
+  if (this.isModified('status')) {
+    const now = new Date();
+    const statusFieldMap = {
+      Viewed: 'viewedAt',
+      Shortlisted: 'shortlistedAt',
+      Interview: 'interviewAt',
+      Offered: 'offeredAt',
+      Hired: 'hiredAt',
+      Rejected: 'rejectedAt',
+      Withdrawn: 'withdrawnAt',
+    };
+
+    const field = statusFieldMap[this.status];
+    if (field && !this[field]) {
+      this[field] = now;
+    }
+
+    // Auto-update category based on status
+    const categoryMap = {
+      Applied: 'pending',
+      Viewed: 'pending',
+      Shortlisted: 'hr-responded',
+      Interview: 'hr-responded',
+      Offered: 'offers',
+      Hired: 'offers',
+      Rejected: 'expired',
+      Withdrawn: 'expired',
+    };
+    this.category = categoryMap[this.status] || 'pending';
+  }
+  next();
+});
+
+// Also handle findOneAndUpdate for admin panel updates
+applicationSchema.pre('findOneAndUpdate', function (next) {
+  const update = this.getUpdate() || {};
+  const newStatus = update.status || update.$set?.status;
+
+  if (newStatus) {
+    const now = new Date();
+    const statusFieldMap = {
+      Viewed: 'viewedAt',
+      Shortlisted: 'shortlistedAt',
+      Interview: 'interviewAt',
+      Offered: 'offeredAt',
+      Hired: 'hiredAt',
+      Rejected: 'rejectedAt',
+      Withdrawn: 'withdrawnAt',
+    };
+
+    const field = statusFieldMap[newStatus];
+    if (field) {
+      if (!update.$set) update.$set = {};
+      update.$set[field] = now;
+    }
+
+    // Auto-set category based on status
+    const categoryMap = {
+      Applied: 'pending',
+      Viewed: 'pending',
+      Shortlisted: 'hr-responded',
+      Interview: 'hr-responded',
+      Offered: 'offers',
+      Hired: 'offers',
+      Rejected: 'expired',
+      Withdrawn: 'expired',
+    };
+    if (!update.$set) update.$set = {};
+    update.$set.category = categoryMap[newStatus] || 'pending';
+
+    this.setUpdate(update);
+  }
+  next();
+});
+
 module.exports =
   applicationDbConnection.models.Application ||
   applicationDbConnection.model('Application', applicationSchema);
