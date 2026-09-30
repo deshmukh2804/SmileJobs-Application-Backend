@@ -32,6 +32,31 @@ const generateAuthToken = (user) => {
   );
 };
 
+// ─────────────────────────────────────────────────────────────
+// 🔗 ACCOUNT LINKING HELPER
+// Merges auth providers so one user = one account across
+// phone, email, and google logins.
+// ─────────────────────────────────────────────────────────────
+const linkAuthProvider = (user, newProvider) => {
+  const current = user.authProvider || 'phone';
+
+  if (current === 'all') return; // already has everything
+
+  const providers = new Set(current === 'both'
+    ? ['phone', 'google']
+    : [current]
+  );
+  providers.add(newProvider);
+
+  if (providers.size >= 3) {
+    user.authProvider = 'all';
+  } else if (providers.size === 2) {
+    user.authProvider = 'both';
+  } else {
+    user.authProvider = newProvider;
+  }
+};
+
 // ─────────────────────────────────
 // 📱 POST /api/auth/send-otp
 // ─────────────────────────────────
@@ -95,14 +120,15 @@ exports.verifyOTP = async (req, res) => {
         role: 'job_seeker',
       });
       isNewUser = true;
-      console.log(`[Auth] ✅ NEW user: ${phoneNumber} → ${user._id}`);
+      console.log(`[Auth] ✅ NEW phone user: ${phoneNumber} → ${user._id}`);
     } else {
       user = allUsers[0];
       user.isVerified = true;
       user.lastLogin = new Date();
+      linkAuthProvider(user, 'phone');
       await user.save();
       console.log(
-        `[Auth] ✅ LOGIN: ${phoneNumber} → ${user._id} (${user.profileCompletion || 0}%)`
+        `[Auth] ✅ LOGIN phone: ${phoneNumber} → ${user._id} (${user.profileCompletion || 0}%)`
       );
 
       if (allUsers.length > 1) {
@@ -152,7 +178,7 @@ exports.sendEmailOTP = async (req, res) => {
 
     const cleanEmail = email.toLowerCase().trim();
 
-    // Check rate limit
+    // Rate limit check
     const rateCheck = canResendEmailOTP(cleanEmail);
     if (!rateCheck.allowed) {
       return res.status(429).json({
@@ -164,7 +190,6 @@ exports.sendEmailOTP = async (req, res) => {
     const otp = generateEmailOTP(cleanEmail);
     console.log(`📩 EMAIL OTP → ${cleanEmail} : ${otp}`);
 
-    // Dynamic Branded email body template
     const emailBody = `
       <h2 style="margin:0 0 12px;color:#42326E;font-size:22px;font-weight:800;">
         Your Login Verification Code
@@ -179,7 +204,7 @@ exports.sendEmailOTP = async (req, res) => {
         </div>
       </div>
       <p style="margin:16px 0 8px;color:#666;font-size:13px;">
-        This code expires in <b>5 minutes</b>. Do not reply to this message or share this OTP with anyone for security.
+        This code expires in <b>5 minutes</b>. Do not reply to this message or share this OTP with anyone.
       </p>
     `;
 
@@ -190,15 +215,16 @@ exports.sendEmailOTP = async (req, res) => {
 
     const mailResult = await sendEmail({
       to: cleanEmail,
-      subject: `${otp} is your verification code`,
+      subject: `${otp} is your Smile Jobs verification code`,
       html: htmlContent,
       recipientName: cleanEmail.split('@')[0],
     });
 
     if (!mailResult.success) {
+      console.error('❌ Email dispatch failed:', mailResult.error);
       return res.status(500).json({
         success: false,
-        message: 'Failed to dispatch email. Check SMTP server.',
+        message: 'Failed to send OTP email. Please try again.',
       });
     }
 
@@ -215,9 +241,12 @@ exports.sendEmailOTP = async (req, res) => {
   }
 };
 
-// ─────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 // ✅ POST /api/auth/verify-email-otp
-// ─────────────────────────────────
+// 🔗 ACCOUNT LINKING: If this email already belongs to a user
+//    (from Google or Phone login), we log into THAT account
+//    instead of creating a duplicate.
+// ─────────────────────────────────────────────────────────────
 exports.verifyEmailOTP = async (req, res) => {
   try {
     const { email, otp } = req.body;
@@ -231,18 +260,44 @@ exports.verifyEmailOTP = async (req, res) => {
 
     const cleanEmail = email.toLowerCase().trim();
 
+    if (!isValidDeliverableEmail(cleanEmail)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide a valid email address',
+      });
+    }
+
+    // 1. Verify OTP
     const otpResult = verifyEmailOTP(cleanEmail, otp);
     if (!otpResult.success) {
       return res.status(401).json({ success: false, message: otpResult.message });
     }
 
-    const allUsers = await User.find({ email: cleanEmail })
+    // 2. 🔗 ACCOUNT LINKING — Search for ANY existing user with this email
+    //    This covers: Google login, previous Email OTP login, or Phone user
+    //    who later added this email to their profile.
+    let user = await User.findOne({ email: cleanEmail })
       .sort({ profileCompletion: -1, updatedAt: -1 });
 
-    let user;
     let isNewUser = false;
 
-    if (allUsers.length === 0) {
+    if (user) {
+      // ── EXISTING USER FOUND (from Google, Phone, or previous Email login) ──
+      user.isVerified = true;
+      user.lastLogin = new Date();
+      linkAuthProvider(user, 'email');
+
+      // Ensure email field is set (in case it was a phone-only user who added email to profile)
+      if (!user.email) {
+        user.email = cleanEmail;
+      }
+
+      await user.save();
+      console.log(
+        `[Auth] 🔗 LINKED email login: ${cleanEmail} → existing user ${user._id} (provider: ${user.authProvider})`
+      );
+    } else {
+      // ── NO EXISTING USER — Create brand new account ──
       user = await User.create({
         email: cleanEmail,
         isVerified: true,
@@ -252,26 +307,6 @@ exports.verifyEmailOTP = async (req, res) => {
       });
       isNewUser = true;
       console.log(`[Auth] ✅ NEW email user: ${cleanEmail} → ${user._id}`);
-    } else {
-      user = allUsers[0];
-      user.isVerified = true;
-      user.lastLogin = new Date();
-
-      if (user.authProvider && user.authProvider !== 'email' && user.authProvider !== 'both') {
-        user.authProvider = 'both';
-      } else if (!user.authProvider) {
-        user.authProvider = 'email';
-      }
-
-      await user.save();
-      console.log(`[Auth] ✅ LOGIN email user: ${cleanEmail} → ${user._id}`);
-
-      if (allUsers.length > 1) {
-        const dupIds = allUsers.slice(1).map((u) => u._id);
-        User.deleteMany({ _id: { $in: dupIds } })
-          .then(() => console.log(`[Auth] 🧹 Removed ${dupIds.length} duplicate email users`))
-          .catch((err) => console.log('[Auth] Duplicate cleanup error:', err.message));
-      }
     }
 
     const token = generateAuthToken(user);
@@ -297,9 +332,11 @@ exports.verifyEmailOTP = async (req, res) => {
   }
 };
 
-// ─────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 // 🔵 POST /api/auth/google
-// ─────────────────────────────────
+// 🔗 ACCOUNT LINKING: If this Google email already belongs to
+//    a user (from Email OTP or Phone login), merge into that account.
+// ─────────────────────────────────────────────────────────────
 exports.googleLogin = async (req, res) => {
   try {
     const { idToken } = req.body;
@@ -329,28 +366,35 @@ exports.googleLogin = async (req, res) => {
     const name = payload.name || '';
     const picture = payload.picture || '';
 
+    // 1. First try to find by googleId
     let user = await User.findOne({ googleId });
     let isNewUser = false;
 
+    // 2. 🔗 If no googleId match, search by EMAIL (links Email OTP ↔ Google)
     if (!user && email) {
-      user = await User.findOne({ email });
+      user = await User.findOne({ email: email.toLowerCase().trim() });
     }
 
     if (user) {
+      // ── EXISTING USER — Link Google to their account ──
       if (!user.googleId) {
         user.googleId = googleId;
-        user.authProvider = user.phoneNumber ? 'both' : 'google';
       }
       if (!user.name && name) user.name = name;
-      if (!user.email && email) user.email = email;
+      if (!user.email && email) user.email = email.toLowerCase().trim();
       if (!user.avatarUrl && picture) user.avatarUrl = picture;
       user.isVerified = true;
       user.lastLogin = new Date();
+      linkAuthProvider(user, 'google');
       await user.save();
+      console.log(
+        `[Auth] 🔗 LINKED Google login: ${email} → existing user ${user._id} (provider: ${user.authProvider})`
+      );
     } else {
+      // ── NEW USER ──
       user = await User.create({
         googleId,
-        email,
+        email: email.toLowerCase().trim(),
         name,
         avatarUrl: picture,
         authProvider: 'google',
@@ -359,6 +403,7 @@ exports.googleLogin = async (req, res) => {
         lastLogin: new Date(),
       });
       isNewUser = true;
+      console.log(`[Auth] ✅ NEW Google user: ${email} → ${user._id}`);
     }
 
     const token = generateAuthToken(user);

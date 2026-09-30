@@ -19,7 +19,7 @@ const userSchema = new mongoose.Schema(
     googleId: { type: String, trim: true },
     authProvider: {
       type: String,
-      enum: ['phone', 'google', 'both'],
+      enum: ['phone', 'google', 'email', 'both', 'all'],
       default: 'phone',
     },
     isVerified: { type: Boolean, default: false },

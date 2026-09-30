@@ -6,7 +6,8 @@ const FROM_NAME = process.env.EMAIL_FROM_NAME || "Smile Jobs";
 const FROM_EMAIL = process.env.EMAIL_FROM || process.env.EMAIL_FROM_ADDRESS || "info.smilejobs@gmail.com";
 const REPLY_TO = process.env.EMAIL_REPLY_TO || FROM_EMAIL;
 const APP_NAME = process.env.APP_NAME || "Smile Jobs";
-const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
+const APP_TAGLINE = process.env.APP_TAGLINE || "Find Your Dream Job. Get Hired 10X Faster.";
+const FRONTEND_URL = process.env.FRONTEND_URL || "https://smilejobs.in";
 
 // Determine key type (SMTP vs API)
 const rawKey = process.env.SMTP_PASS || process.env.EMAIL_PASS;
@@ -259,10 +260,18 @@ const verifyConnection = async () => {
 })();
 
 /**
- * Branded HTML layout wrapper
+ * ─────────────────────────────────────────────────────
+ * 🎨 SMILE JOBS BRANDED EMAIL TEMPLATE
+ * ─────────────────────────────────────────────────────
+ * Features:
+ * - Custom "SJ" logo mark with gradient background
+ * - Smile Jobs branded header with tagline
+ * - Purple gradient theme matching mobile app (#42326E)
+ * - Feature highlights row (50K+ Recruiters, 10X Faster)
+ * - Responsive footer with contact info
  */
 const wrapEmailTemplate = (content, options = {}) => {
-  const { heading = APP_NAME, footerNote = "", buttonText, buttonUrl } = options;
+  const { heading = "", footerNote = "", buttonText, buttonUrl } = options;
 
   return `
 <!DOCTYPE html>
@@ -270,43 +279,100 @@ const wrapEmailTemplate = (content, options = {}) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${heading}</title>
+  <title>${APP_NAME} - ${heading || 'Notification'}</title>
 </head>
-<body style="margin:0;padding:0;background-color:#f4f4f7;font-family:'Segoe UI',Roboto,Arial,sans-serif;">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f7;padding:32px 16px;">
+<body style="margin:0;padding:0;background-color:#F4F1FA;font-family:'Segoe UI',Roboto,-apple-system,Arial,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#F4F1FA;padding:32px 16px;">
     <tr>
       <td align="center">
-        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;background-color:#ffffff;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,0.06);overflow:hidden;">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;background-color:#FFFFFF;border-radius:16px;box-shadow:0 4px 20px rgba(66,50,110,0.08);overflow:hidden;">
+
+          <!-- ═══════ SMILE JOBS BRANDED HEADER ═══════ -->
           <tr>
-            <td style="background:linear-gradient(135deg,#4F46E5 0%,#7C3AED 100%);padding:32px 24px;text-align:center;">
-              <h1 style="margin:0;color:#ffffff;font-size:24px;font-weight:700;">${APP_NAME}</h1>
-              <p style="margin:6px 0 0;color:rgba(255,255,255,0.85);font-size:13px;">${heading}</p>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:32px 28px;color:#333333;font-size:15px;line-height:1.6;">
-              ${content}
+            <td style="background:linear-gradient(135deg,#42326E 0%,#6E44D3 60%,#7C3AED 100%);padding:36px 28px;text-align:center;">
+              <!-- Logo Mark SJ -->
+              <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto 14px;">
+                <tr>
+                  <td style="background:rgba(255,255,255,0.18);width:60px;height:60px;border-radius:16px;text-align:center;vertical-align:middle;border:2px solid rgba(255,255,255,0.3);">
+                    <span style="color:#FFFFFF;font-size:26px;font-weight:900;letter-spacing:1px;line-height:60px;">SJ</span>
+                  </td>
+                </tr>
+              </table>
+              <!-- App Name -->
+              <h1 style="margin:0;color:#FFFFFF;font-size:28px;font-weight:900;letter-spacing:-0.5px;">
+                ${APP_NAME}
+              </h1>
+              <!-- Tagline -->
+              <p style="margin:8px 0 0;color:rgba(255,255,255,0.9);font-size:13px;font-weight:500;letter-spacing:0.3px;">
+                ${APP_TAGLINE}
+              </p>
               ${
-                buttonText && buttonUrl
-                  ? `
-                <div style="text-align:center;margin:28px 0 8px;">
-                  <a href="${buttonUrl}" style="display:inline-block;padding:14px 32px;background:linear-gradient(135deg,#4F46E5 0%,#7C3AED 100%);color:#ffffff;text-decoration:none;font-weight:600;font-size:14px;border-radius:8px;">
-                    ${buttonText}
-                  </a>
-                </div>`
-                  : ""
+                heading
+                  ? `<div style="margin-top:16px;display:inline-block;padding:6px 16px;background:rgba(255,255,255,0.2);border-radius:20px;">
+                       <span style="color:#FFFFFF;font-size:12px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;">${heading}</span>
+                     </div>`
+                  : ''
               }
             </td>
           </tr>
+
+          <!-- ═══════ MAIN BODY CONTENT ═══════ -->
           <tr>
-            <td style="background-color:#fafafa;padding:20px 24px;text-align:center;border-top:1px solid #eeeeee;">
-              ${footerNote ? `<p style="margin:0 0 8px;font-size:12px;color:#666;">${footerNote}</p>` : ""}
-              <p style="margin:0;font-size:11px;color:#999;">
-                © ${new Date().getFullYear()} ${APP_NAME}. All rights reserved.<br>
-                Contact: <a href="mailto:${REPLY_TO}" style="color:#4F46E5;text-decoration:none;">${REPLY_TO}</a>
+            <td style="padding:36px 32px 24px;color:#29233A;font-size:15px;line-height:1.65;">
+              ${content}
+              ${
+                buttonText && buttonUrl
+                  ? `<div style="text-align:center;margin:32px 0 12px;">
+                       <a href="${buttonUrl}" style="display:inline-block;padding:14px 36px;background:linear-gradient(135deg,#42326E 0%,#6E44D3 100%);color:#FFFFFF;text-decoration:none;font-weight:700;font-size:14px;border-radius:10px;box-shadow:0 4px 12px rgba(66,50,110,0.3);letter-spacing:0.3px;">
+                         ${buttonText}
+                       </a>
+                     </div>`
+                  : ''
+              }
+            </td>
+          </tr>
+
+          <!-- ═══════ FEATURE HIGHLIGHTS ROW ═══════ -->
+          <tr>
+            <td style="padding:16px 28px 24px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#F8F6FD;border-radius:12px;padding:16px 12px;border:1px solid #E8E3EF;">
+                <tr>
+                  <td align="center" width="33%" style="padding:8px 4px;">
+                    <div style="font-size:22px;font-weight:900;color:#42326E;line-height:1;">50K+</div>
+                    <div style="font-size:10px;color:#6F687A;margin-top:4px;font-weight:600;">Recruiters</div>
+                  </td>
+                  <td align="center" width="33%" style="padding:8px 4px;border-left:1px solid #E8E3EF;border-right:1px solid #E8E3EF;">
+                    <div style="font-size:22px;font-weight:900;color:#6E44D3;line-height:1;">10X</div>
+                    <div style="font-size:10px;color:#6F687A;margin-top:4px;font-weight:600;">Faster Hiring</div>
+                  </td>
+                  <td align="center" width="33%" style="padding:8px 4px;">
+                    <div style="font-size:22px;font-weight:900;color:#42326E;line-height:1;">★</div>
+                    <div style="font-size:10px;color:#6F687A;margin-top:4px;font-weight:600;">Verified HRs</div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- ═══════ FOOTER ═══════ -->
+          <tr>
+            <td style="background-color:#FAF7FD;padding:24px 28px;text-align:center;border-top:1px solid #EFE9FC;">
+              ${
+                footerNote
+                  ? `<p style="margin:0 0 12px;font-size:12px;color:#6F687A;line-height:1.5;">${footerNote}</p>`
+                  : ''
+              }
+              <p style="margin:0 0 8px;font-size:11px;color:#94A3B8;line-height:1.6;">
+                © ${new Date().getFullYear()} <b style="color:#42326E;">${APP_NAME}</b>. All rights reserved.<br>
+                Need assistance? Contact us at 
+                <a href="mailto:${REPLY_TO}" style="color:#6E44D3;text-decoration:none;font-weight:600;">${REPLY_TO}</a>
+              </p>
+              <p style="margin:12px 0 0;font-size:10px;color:#B2A6CE;">
+                You received this email because you have an account with ${APP_NAME}.
               </p>
             </td>
           </tr>
+
         </table>
       </td>
     </tr>
