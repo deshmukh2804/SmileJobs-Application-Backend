@@ -7,11 +7,9 @@ const notificationSchema = new mongoose.Schema(
       adminName: { type: String, default: '' },
       adminEmail: { type: String, default: '' },
     },
-
     title: { type: String, required: true },
     body: { type: String, required: true },
     imageUrl: { type: String, default: '' },
-
     targetAudience: {
       type: String,
       enum: ['all', 'specific', 'city', 'role', 'skills', 'candidates', 'recruiters'],
@@ -20,32 +18,20 @@ const notificationSchema = new mongoose.Schema(
     targetUserIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     targetCity: { type: String, default: '' },
     targetRole: { type: String, default: '' },
-
-    filters: {
-      skills: { type: [String], default: [] },
-    },
-
+    filters: { skills: { type: [String], default: [] } },
     channels: {
       inApp: { type: Boolean, default: true },
       email: { type: Boolean, default: false },
       push: { type: Boolean, default: true },
     },
-
-    type: {
-      type: String,
-      default: 'job_alert',
-    },
-
+    type: { type: String, default: 'job_alert' },
     data: { type: Object, default: {} },
-
     sentAt: { type: Date, default: Date.now },
-
     status: {
       type: String,
       enum: ['pending', 'sent', 'failed', 'partial'],
       default: 'sent',
     },
-
     stats: {
       totalTargeted: { type: Number, default: 0 },
       inAppDelivered: { type: Number, default: 0 },
@@ -54,14 +40,10 @@ const notificationSchema = new mongoose.Schema(
       pushSent: { type: Number, default: 0 },
       pushFailed: { type: Number, default: 0 },
     },
-
     pushProcessed: { type: Boolean, default: false },
     errorLog: { type: [String], default: [] },
   },
-  {
-    timestamps: true,
-    collection: 'notifications',
-  }
+  { timestamps: true, collection: 'notifications' }
 );
 
 notificationSchema.index({ createdAt: -1 });

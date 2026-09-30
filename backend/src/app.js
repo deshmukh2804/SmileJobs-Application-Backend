@@ -38,12 +38,15 @@ const searchRoutes = require('./routes/searchRoutes');
 const fcmRoutes = require('./routes/fcmRoutes');
 const internalNotificationRoutes = require('./routes/internalNotificationRoutes');
 
+// ✅ IMPORT NEW NOTIFICATION ROUTES (Fixes the 404 error)
+const notificationRoutes = require('./routes/notificationRoutes'); 
+
 // ─────────────────────────────────────────────
 // ROUTE MOUNTING (Order matters!)
 // ─────────────────────────────────────────────
 app.use('/api/auth', authRoutes);
-app.use('/api/profile', profileRoutes);           // ✅ /api/profile/notifications lives here
-app.use('/api/v1/jobs', jobRoutes);               // ✅ /api/v1/jobs/:id/save & /api/v1/jobs/saved live here
+app.use('/api/profile', profileRoutes);           
+app.use('/api/v1/jobs', jobRoutes);               
 app.use('/api/v1/home', homeRoutes);
 app.use('/api/v1/banners', bannerRoutes);
 app.use('/api/v1/locations', locationRoutes);
@@ -51,6 +54,9 @@ app.use('/api/v1/applications', applicationRoutes);
 app.use('/api/v1/search', searchRoutes);
 app.use('/api/v1/fcm', fcmRoutes);
 app.use('/api/v1/internal/notifications', internalNotificationRoutes);
+
+// ✅ MOUNT NEW NOTIFICATION ROUTES (Matches your React Native app's requests)
+app.use('/api/notifications', notificationRoutes);
 
 // Bottom nav (used by AndroidBottomNav.tsx)
 const homeController = require('./controllers/homeController');
@@ -71,6 +77,7 @@ app.get('/', (req, res) => {
       savedJobs: '/api/v1/jobs/saved',
       saveJob: 'POST /api/v1/jobs/:id/save',
       unsaveJob: 'DELETE /api/v1/jobs/:id/save',
+      fcmToken: 'POST /api/notifications/fcm-token', // ✅ Added to health check
     },
   });
 });
