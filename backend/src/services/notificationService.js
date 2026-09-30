@@ -19,93 +19,74 @@ function safeString(val) {
 }
 
 // ─────────────────────────────────────────────
-// 📋 TEMPLATE 1 — NEW JOB NOTIFICATION (NAMELESS)
-// Used when type = job_alert | new_job | job
+// 📋 TEMPLATE 1 — MULTI-LINE JOB NOTIFICATION (Matches Image)
 // ─────────────────────────────────────────────
-function buildJobNotificationTemplate(doc) {
+function buildJobNotificationTemplate(doc, userName = '') {
   const d = doc.data || {};
 
-  const jobTitle = safeString(d.title || d.jobTitle || doc.title) || 'New Opportunity';
-  const company  = safeString(d.companyName || d.company);
-  const location = safeString(d.location || d.city || doc.targetCity);
-  const salary   = safeString(d.salary || d.currentSalary || d.salaryRange);
-  const jobType  = safeString(d.workType || d.jobType || d.type);
-  const deadline = safeString(d.deadline || d.applyBefore);
+  // Get data dynamically from Admin panel data object
+  const hrName   = safeString(d.hrName || 'HR');
+  const jobRole  = safeString(d.jobRole || d.title || doc.title);
+  const salary   = safeString(d.salary || d.salaryRange);
+  const location = safeString(d.location || d.subLocation);
+  const city     = safeString(d.city || doc.targetCity);
 
   // ── Title ──
-  const title = company 
-    ? `New ${jobTitle} opening at ${company}! 🔥` 
-    : `New ${jobTitle} just posted! 🔥`;
+  // If admin provided a strict title, use it. Otherwise, generate like the image.
+  let title = doc.title;
+  if (!title || title.trim() === '') {
+    title = userName 
+      ? `${userName}, ${hrName} already reviewed your profile.`
+      : `${hrName} already reviewed your profile.`;
+  }
 
-  // ── Body ──
-  const parts = [];
-  if (location) parts.push(`📍 ${location}`);
-  if (salary)   parts.push(`💰 ${salary}`);
-  if (jobType)  parts.push(`💼 ${jobType}`);
-
-  let body = parts.length > 0 ? parts.join(' · ') + '. ' : '';
-  body += 'Apply now before the deadline!';
-  if (deadline) body += ` Closes: ${deadline}.`;
+  // ── Body (Using \n to create the multi-line list format) ──
+  // If admin provided a strict body text, use it. Otherwise, build it dynamically.
+  let body = doc.body;
+  if (!body || body.trim() === '') {
+    const parts = [];
+    if (jobRole)  parts.push(`${jobRole}`);
+    if (salary)   parts.push(`Salary : ${salary}`);
+    if (location) parts.push(`Location : ${location}`);
+    if (city)     parts.push(`City : ${city}`);
+    
+    parts.push(''); // Creates an empty line
+    parts.push('VIEW DETAILS');
+    
+    body = parts.join('\n'); // Joins array with newlines for multi-line notification
+  }
 
   return { title, body };
 }
 
 // ─────────────────────────────────────────────
-// 📋 TEMPLATE 2 — GENERAL PUSH NOTIFICATION (NAMELESS)
-// Used for interview slots, status changes, chats, etc.
+// 📋 TEMPLATE 2 — GENERAL PUSH NOTIFICATION
 // ─────────────────────────────────────────────
-function buildPushNotificationTemplate(doc) {
+function buildPushNotificationTemplate(doc, userName = '') {
   const d = doc.data || {};
 
-  const action     = safeString(d.action || d.eventType || 'update');
-  const jobTitle   = safeString(d.title || d.jobTitle || doc.title) || '';
-  const company    = safeString(d.companyName || d.company);
-  const location   = safeString(d.location || d.city || doc.targetCity);
-  const slotTime   = safeString(d.slotTime || d.interviewTime || d.scheduledAt);
-
-  // ── Contextual Intro ──
-  let intro = 'A new update has been posted.';
-  if (action === 'interview') {
-    intro = 'An interview slot has been scheduled.';
-  } else if (action === 'shortlist') {
-    intro = 'Your profile has been shortlisted!';
-  }
-
-  // ── Title ──
-  let title = 'New update available 📬';
-  if (action === 'interview') {
-    title = 'Interview slot confirmed! 🕒';
-  } else if (action === 'shortlist') {
-    title = "You're shortlisted! 🎉";
-  }
-
-  // ── Body ──
-  let body = intro;
-  if (jobTitle) body += ` Role: ${jobTitle}`;
-  if (company)  body += ` at ${company}`;
-  if (location) body += `, ${location}`;
-  if (slotTime) body += `. Slot: ${slotTime}`;
-  body += '. Tap to view details.';
+  let title = doc.title || (userName ? `Hello ${userName}, new update available 📬` : 'New update available 📬');
+  let body = doc.body || 'Tap to view details.';
 
   return { title, body };
 }
 
 // ─────────────────────────────────────────────
-// 🔀 TEMPLATE ROUTER — picks the right builder
+// 🔀 TEMPLATE ROUTER
 // ─────────────────────────────────────────────
-function buildTemplate(doc) {
+function buildTemplate(doc, userName = '') {
   const type = String(doc.type || '').toLowerCase().trim();
-  const JOB_TYPES = ['job_alert', 'new_job', 'job', 'job_opening', 'job_post'];
+  const JOB_TYPES = ['job_alert', 'new_job', 'job', 'job_opening', 'job_post', 'profile_review'];
 
   if (JOB_TYPES.includes(type)) {
-    return buildJobNotificationTemplate(doc);
+    return buildJobNotificationTemplate(doc, userName);
   }
 
-  return buildPushNotificationTemplate(doc);
+  return buildPushNotificationTemplate(doc, userName);
 }
 
 /**
- * Sends FCM notifications to tokens with full Android compatibility.
+ * Sends FCM notifications to tokens.
  */
 async function sendToTokens(tokens, notification, data = {}) {
   const app = initFirebaseAdmin();
@@ -115,11 +96,8 @@ async function sendToTokens(tokens, notification, data = {}) {
   }
 
   const messaging = getMessaging(app);
-
   const tokenArray = Array.isArray(tokens) ? tokens : [tokens];
-  if (!tokenArray.length) {
-    return { success: false, message: 'No tokens provided', successCount: 0, failureCount: 0 };
-  }
+  if (!tokenArray.length) return { success: false, message: 'No tokens', successCount: 0, failureCount: 0 };
 
   const stringifiedData = {};
   Object.keys(data || {}).forEach((key) => {
@@ -128,19 +106,18 @@ async function sendToTokens(tokens, notification, data = {}) {
 
   const messagePayload = {
     notification: {
-      title: notification.title || 'CareerFlow',
-      body: notification.body || '',
-      ...(notification.imageUrl ? { imageUrl: notification.imageUrl } : {}),
+      title: notification.title,
+      body: notification.body,
+      // If admin uploads an image URL, it will show on the right side of the notification
+      ...(notification.imageUrl ? { imageUrl: notification.imageUrl } : {}), 
     },
     data: stringifiedData,
     android: {
       priority: 'high',
-      ttl: 60 * 60 * 24 * 1000,
       notification: {
         channelId: 'default',
-        sound: 'default',
+        style: 'bigtext', // Crucial for multi-line \n rendering on Android
         priority: 'max',
-        visibility: 'public',
         defaultSound: true,
         defaultVibrateTimings: true,
         ...(notification.imageUrl ? { imageUrl: notification.imageUrl } : {}),
@@ -167,11 +144,7 @@ async function sendToTokens(tokens, notification, data = {}) {
       response.responses.forEach((res, idx) => {
         if (!res.success) {
           const errorCode = res.error?.code || '';
-          console.log(`[FCM] Token delivery failure: ${errorCode}`, res.error?.message);
-          if (
-            errorCode === 'messaging/invalid-registration-token' ||
-            errorCode === 'messaging/registration-token-not-registered'
-          ) {
+          if (errorCode === 'messaging/invalid-registration-token' || errorCode === 'messaging/registration-token-not-registered') {
             invalidTokens.push(chunk[idx]);
           }
         }
@@ -183,17 +156,10 @@ async function sendToTokens(tokens, notification, data = {}) {
         { 'fcmTokens.token': { $in: invalidTokens } },
         { $pull: { fcmTokens: { token: { $in: invalidTokens } } } }
       );
-      console.log(`[FCM] 🧹 Cleaned ${invalidTokens.length} expired tokens`);
     }
 
-    return {
-      success: totalSuccess > 0,
-      successCount: totalSuccess,
-      failureCount: totalFailure,
-      invalidTokensRemoved: invalidTokens.length,
-    };
+    return { success: totalSuccess > 0, successCount: totalSuccess, failureCount: totalFailure };
   } catch (err) {
-    console.error('[FCM] Send error:', err.message);
     return { success: false, message: err.message, successCount: 0, failureCount: 0 };
   }
 }
@@ -203,49 +169,19 @@ async function sendToTokens(tokens, notification, data = {}) {
  */
 async function resolveTargetUsers(notificationDoc) {
   const { targetAudience, targetUserIds = [], targetCity, targetRole, filters = {} } = notificationDoc;
-
   let query = { 'fcmTokens.0': { $exists: true } };
 
   switch ((targetAudience || 'all').toLowerCase()) {
-    case 'all':
-      break;
-    case 'candidates':
-    case 'candidate':
-    case 'job_seeker':
-    case 'job_seekers':
-      query.role = 'job_seeker';
-      break;
-    case 'recruiters':
-    case 'recruiter':
-      query.role = 'recruiter';
-      break;
-    case 'specific':
-      if (targetUserIds && targetUserIds.length > 0) {
-        query._id = { $in: targetUserIds };
-      }
-      break;
-    case 'city':
-      if (targetCity) {
-        query.city = new RegExp(`^${targetCity}$`, 'i');
-      }
-      break;
-    case 'role':
-      if (targetRole) {
-        query.role = targetRole;
-      }
-      break;
-    case 'skills':
-      if (filters?.skills && filters.skills.length > 0) {
-        query.skills = { $in: filters.skills };
-      }
-      break;
-    default:
-      break;
+    case 'candidates': query.role = 'job_seeker'; break;
+    case 'recruiters': query.role = 'recruiter'; break;
+    case 'specific': if (targetUserIds.length) query._id = { $in: targetUserIds }; break;
+    case 'city': if (targetCity) query.city = new RegExp(`^${targetCity}$`, 'i'); break;
+    case 'role': if (targetRole) query.role = targetRole; break;
+    case 'skills': if (filters?.skills?.length) query.skills = { $in: filters.skills }; break;
   }
 
-  // Optimized fetch: We no longer need the user's name field
-  const users = await User.find(query).select('fcmTokens').lean();
-  return users;
+  // NOTE: Added 'name' to the select query so we can personalize the notification title
+  return await User.find(query).select('fcmTokens name').lean();
 }
 
 /**
@@ -253,22 +189,41 @@ async function resolveTargetUsers(notificationDoc) {
  */
 async function pushForNotification(notificationDoc) {
   const users = await resolveTargetUsers(notificationDoc);
-  if (!users.length) {
-    console.log('[FCM] ⚠️ No targeted users found with active tokens.');
-    return {
-      success: false,
-      message: 'No registered user devices found for targeted audience',
-      successCount: 0,
-      failureCount: 0,
-    };
-  }
+  if (!users.length) return { success: false, message: 'No registered user devices found' };
 
   const mobileType = mapType(notificationDoc.type);
   const isBulkSend = users.length > 2000;
 
-  // Since names are completely removed, we can build the template title and body
-  // ONCE per push execution, making notifications dispatch significantly faster!
-  const { title, body } = buildTemplate(notificationDoc);
+  let successCount = 0;
+  let failureCount = 0;
+
+  // ── INDIVIDUAL DISPATCH (Allows Personalized Names like "Mayank,...") ──
+  if (!isBulkSend || notificationDoc.title === "") {
+    for (const u of users) {
+      const tokens = (u.fcmTokens || []).map(t => t.token).filter(Boolean);
+      if (!tokens.length) continue;
+
+      // Pass user's name to template builder
+      const { title, body } = buildTemplate(notificationDoc, u.name);
+
+      const globalDataPayload = {
+        type: mobileType,
+        notificationId: String(notificationDoc._id),
+        title,
+        body,
+        ...(notificationDoc.data || {}),
+      };
+
+      const res = await sendToTokens(tokens, { title, body, imageUrl: notificationDoc.imageUrl }, globalDataPayload);
+      successCount += res.successCount || 0;
+      failureCount += res.failureCount || 0;
+    }
+    return { success: successCount > 0, successCount, failureCount };
+  }
+
+  // ── MULTICAST DISPATCH (For massive bulk sends without names to save performance) ──
+  const { title, body } = buildTemplate(notificationDoc, ''); // No specific name
+  const allTokens = users.flatMap(u => (u.fcmTokens || []).map(t => t.token).filter(Boolean));
 
   const globalDataPayload = {
     type: mobileType,
@@ -278,47 +233,7 @@ async function pushForNotification(notificationDoc) {
     ...(notificationDoc.data || {}),
   };
 
-  // ── INDIVIDUAL DISPATCH (< 2000 users) ──
-  if (!isBulkSend) {
-    let successCount = 0;
-    let failureCount = 0;
-    let invalidTokensRemoved = 0;
-
-    console.log(`[FCM] Dispatching nameless structured alerts to ${users.length} users...`);
-
-    for (const u of users) {
-      const tokens = (u.fcmTokens || []).map(t => t.token).filter(Boolean);
-      if (!tokens.length) continue;
-
-      const res = await sendToTokens(
-        tokens,
-        { title, body, imageUrl: notificationDoc.imageUrl || '' },
-        globalDataPayload
-      );
-
-      successCount += res.successCount || 0;
-      failureCount += res.failureCount || 0;
-      invalidTokensRemoved += res.invalidTokensRemoved || 0;
-    }
-
-    return { success: successCount > 0, successCount, failureCount, invalidTokensRemoved };
-  }
-
-  // ── MULTICAST DISPATCH (≥ 2000 users) ──
-  console.log(`[FCM] Dispatching nameless bulk multicast to ${users.length} recipients...`);
-
-  const allTokens = [];
-  users.forEach((u) => {
-    u.fcmTokens?.forEach((t) => {
-      if (t.token) allTokens.push(t.token);
-    });
-  });
-
-  return sendToTokens(
-    allTokens,
-    { title, body, imageUrl: notificationDoc.imageUrl || '' },
-    globalDataPayload
-  );
+  return sendToTokens(allTokens, { title, body, imageUrl: notificationDoc.imageUrl }, globalDataPayload);
 }
 
 module.exports = {
@@ -326,6 +241,5 @@ module.exports = {
   resolveTargetUsers,
   pushForNotification,
   buildJobNotificationTemplate,
-  buildPushNotificationTemplate,
   buildTemplate,
 };
