@@ -1,18 +1,13 @@
-// routes/notificationRoutes.js
 const express = require('express');
 const router = express.Router();
 
-// Adjust the path to your auth middleware
-const { protect } = require('../middlewares/auth'); 
+// ✅ FIXED: Point this to the correct controller
+const {
+  dispatchNotification,
+} = require('../controllers/internalNotificationController');
 
-// Import your FCM controller functions (Ensure this path points to your controller)
-const { registerFcmToken, removeFcmToken, listFcmTokens } = require('../controllers/fcmController');
-
-// ─────────────────────────────────────────────
-// /api/notifications ROUTES
-// ─────────────────────────────────────────────
-router.post('/fcm-token', protect, registerFcmToken);
-router.post('/unregister-fcm', protect, removeFcmToken);
-router.get('/fcm-tokens', protect, listFcmTokens);
+// POST /api/v1/internal/notifications/dispatch
+// Notice: We don't use 'protect' here because internal routes use the 'x-internal-key' header
+router.post('/dispatch', dispatchNotification);
 
 module.exports = router;

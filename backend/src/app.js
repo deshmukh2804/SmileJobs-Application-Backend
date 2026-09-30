@@ -40,6 +40,8 @@ const internalNotificationRoutes = require('./routes/internalNotificationRoutes'
 
 // ✅ IMPORT NEW NOTIFICATION ROUTES (Fixes the 404 error)
 const notificationRoutes = require('./routes/notificationRoutes'); 
+app.use('/api/notifications', fcmRoutes); 
+app.use('/api/v1/fcm', fcmRoutes)
 
 // ─────────────────────────────────────────────
 // ROUTE MOUNTING (Order matters!)
