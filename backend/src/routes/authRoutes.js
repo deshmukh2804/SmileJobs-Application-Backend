@@ -20,11 +20,15 @@ const resolveHandler = (fnName, fallbackFn) => {
 // ── Auth Endpoints ──
 const sendOTPHandler = resolveHandler('sendOTP', resolveHandler('sendOtp'));
 const verifyOTPHandler = resolveHandler('verifyOTP', resolveHandler('verifyOtp'));
+const sendEmailOTPHandler = resolveHandler('sendEmailOTP', resolveHandler('sendEmailOtp'));
+const verifyEmailOTPHandler = resolveHandler('verifyEmailOTP', resolveHandler('verifyEmailOtp'));
 const googleHandler = resolveHandler('googleAuth', resolveHandler('google', resolveHandler('googleLogin')));
 const getProfileHandler = resolveHandler('getProfile', resolveHandler('getMyProfile', resolveHandler('me', resolveHandler('profile'))));
 
 router.post('/send-otp', sendOTPHandler);
 router.post('/verify-otp', verifyOTPHandler);
+router.post('/send-email-otp', sendEmailOTPHandler);
+router.post('/verify-email-otp', verifyEmailOTPHandler);
 router.post('/google', googleHandler);
 router.get('/profile', auth, getProfileHandler);
 router.get('/me', auth, getProfileHandler);
