@@ -7,16 +7,17 @@ const {
   listFcmTokens,
 } = require('../controllers/fcmController');
 
-// ✅ FIXED: Corrected the path to your auth middleware
+// Correct import path for your auth middleware
 const { protect } = require('../middleware/authMiddleware');
 
 // All FCM routes require authentication
 router.post('/fcm-token', protect, registerFcmToken);
 
-// Support both POST and DELETE for removing tokens depending on how your frontend calls it
+// Handles unregistering FCM tokens on logout (supports both POST and DELETE)
 router.post('/unregister-fcm', protect, removeFcmToken);
 router.delete('/fcm-token', protect, removeFcmToken);
 
-router.get('/fcm-tokens', protect, listFcmTokens); // For debugging
+// For debugging active device tokens
+router.get('/fcm-tokens', protect, listFcmTokens);
 
 module.exports = router;

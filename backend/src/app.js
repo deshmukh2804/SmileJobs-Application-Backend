@@ -18,7 +18,7 @@ app.use(cors({
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
-// Request logger (helps debug route issues)
+// Request logger
 app.use((req, res, next) => {
   console.log(`📥 ${req.method} ${req.originalUrl}`);
   next();
@@ -35,9 +35,7 @@ const bannerRoutes = require('./routes/bannerRoutes');
 const locationRoutes = require('./routes/locationRoutes');
 const applicationRoutes = require('./routes/applicationRoutes');
 const searchRoutes = require('./routes/searchRoutes');
-
-// This file handles FCM Notification tokens (No missing modules now!)
-const fcmRoutes = require('./routes/fcmRoutes'); 
+const fcmRoutes = require('./routes/fcmRoutes');
 const internalNotificationRoutes = require('./routes/internalNotificationRoutes');
 
 // ─────────────────────────────────────────────
@@ -52,11 +50,11 @@ app.use('/api/v1/locations', locationRoutes);
 app.use('/api/v1/applications', applicationRoutes);
 app.use('/api/v1/search', searchRoutes);
 
-// ✅ FIX: Route the React Native App's requests to fcmRoutes
-app.use('/api/notifications', fcmRoutes); 
-app.use('/api/v1/fcm', fcmRoutes); // Kept just in case older versions of your app use it
+// ✅ FIXES THE 404 ERRORS: Mount fcmRoutes under /api/notifications
+app.use('/api/notifications', fcmRoutes);
+app.use('/api/v1/fcm', fcmRoutes);
 
-// Admin Panel Internal Routes
+// Admin Panel Internal Dispatch
 app.use('/api/v1/internal/notifications', internalNotificationRoutes);
 
 // Bottom nav (used by AndroidBottomNav.tsx)
@@ -78,7 +76,7 @@ app.get('/', (req, res) => {
       savedJobs: '/api/v1/jobs/saved',
       saveJob: 'POST /api/v1/jobs/:id/save',
       unsaveJob: 'DELETE /api/v1/jobs/:id/save',
-      fcmToken: 'POST /api/notifications/fcm-token', // ✅ Added for testing
+      fcmToken: 'POST /api/notifications/fcm-token',
     },
   });
 });
