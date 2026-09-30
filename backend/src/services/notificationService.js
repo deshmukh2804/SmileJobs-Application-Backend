@@ -72,10 +72,13 @@ async function sendToTokens(tokens, notification, data = {}) {
   }
 
   const messaging = getMessaging(app);
-  const tokenArray = (Array.isArray(tokens) ? tokens : [tokens]).filter(Boolean);
+
+  // 🛡️ DEDUPLICATE TOKENS: Guarantee array contains only unique tokens
+  const rawArray = Array.isArray(tokens) ? tokens : [tokens];
+  const tokenArray = [...new Set(rawArray.filter(Boolean))];
 
   if (!tokenArray.length) {
-    return { success: false, message: 'No tokens provided', successCount: 0, failureCount: 0 };
+    return { success: false, message: 'No unique tokens provided', successCount: 0, failureCount: 0 };
   }
 
   const stringifiedData = {};
@@ -125,7 +128,7 @@ async function sendToTokens(tokens, notification, data = {}) {
     let totalFailure = 0;
     const invalidTokens = [];
 
-    console.log(`[FCM] 📤 Sending payload to ${tokenArray.length} token(s)...`);
+    console.log(`[FCM] 📤 Sending to ${tokenArray.length} UNIQUE token(s)...`);
 
     for (let i = 0; i < tokenArray.length; i += CHUNK_SIZE) {
       const chunk = tokenArray.slice(i, i + CHUNK_SIZE);
@@ -173,18 +176,14 @@ async function sendToTokens(tokens, notification, data = {}) {
   }
 }
 
-/**
- * Broad & resilient target resolver to guarantee matching logged-in users.
- */
 async function resolveTargetUsers(notificationDoc) {
   const audience = String(notificationDoc.targetAudience || 'all').toLowerCase().trim();
   const targetRole = String(notificationDoc.targetRole || '').toLowerCase().trim();
 
-  // Base requirement: User must have registered an FCM token
   let query = { 'fcmTokens.0': { $exists: true } };
 
   if (audience === 'all') {
-    // Send to every device with a registered token
+    // target all
   } else if (['candidates', 'candidate', 'job_seeker', 'job_seekers'].includes(audience)) {
     query.$or = [
       { role: { $in: ['job_seeker', 'candidate', 'user', 'seeker', ''] } },
@@ -243,7 +242,8 @@ async function pushForNotification(notificationDoc) {
 
   if (!isBulkSend) {
     for (const u of users) {
-      const tokens = (u.fcmTokens || []).map((t) => t.token).filter(Boolean);
+      // 🛡️ Deduplicate tokens per user
+      const tokens = [...new Set((u.fcmTokens || []).map((t) => t.token).filter(Boolean))];
       if (!tokens.length) continue;
 
       const { title, body } = buildTemplate(notificationDoc, u.name || '');
@@ -272,7 +272,8 @@ async function pushForNotification(notificationDoc) {
   }
 
   const { title, body } = buildTemplate(notificationDoc, '');
-  const allTokens = users.flatMap((u) => (u.fcmTokens || []).map((t) => t.token).filter(Boolean));
+  // 🛡️ Deduplicate all bulk tokens
+  const allTokens = [...new Set(users.flatMap((u) => (u.fcmTokens || []).map((t) => t.token).filter(Boolean)))];
 
   const globalDataPayload = {
     type: mobileType,

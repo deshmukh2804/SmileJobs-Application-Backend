@@ -2,7 +2,6 @@ const User = require('../models/User');
 
 // ─────────────────────────────────
 // POST /api/notifications/fcm-token
-// Register or update the current device's FCM token
 // ─────────────────────────────────
 exports.registerFcmToken = async (req, res) => {
   try {
@@ -14,55 +13,34 @@ exports.registerFcmToken = async (req, res) => {
     const { token, platform = 'android', deviceId = '' } = req.body;
 
     if (!token || typeof token !== 'string' || token.trim().length < 10) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid FCM token',
-      });
-    }
-
-    if (!['android', 'ios', 'web'].includes(platform)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid platform',
-      });
+      return res.status(400).json({ success: false, message: 'Invalid FCM token' });
     }
 
     const cleanToken = token.trim();
 
-    // Step 1: Remove this token from ALL other users (device switching accounts)
+    // Step 1: Remove this token from ALL users (cleans duplicate records across DB)
     await User.updateMany(
-      { _id: { $ne: userId }, 'fcmTokens.token': cleanToken },
+      { 'fcmTokens.token': cleanToken },
       { $pull: { fcmTokens: { token: cleanToken } } }
     );
 
-    // Step 2: Update or push for current user
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
+    // Step 2: Push single clean copy to current user
+    await User.updateOne(
+      { _id: userId },
+      {
+        $push: {
+          fcmTokens: {
+            token: cleanToken,
+            platform,
+            deviceId,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+        },
+      }
+    );
 
-    if (!Array.isArray(user.fcmTokens)) {
-      user.fcmTokens = [];
-    }
-
-    const existingIndex = user.fcmTokens.findIndex((t) => t.token === cleanToken);
-
-    if (existingIndex >= 0) {
-      user.fcmTokens[existingIndex].updatedAt = new Date();
-      user.fcmTokens[existingIndex].platform = platform;
-      if (deviceId) user.fcmTokens[existingIndex].deviceId = deviceId;
-    } else {
-      user.fcmTokens.push({
-        token: cleanToken,
-        platform,
-        deviceId,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      });
-    }
-
-    await user.save();
-    console.log(`[FCM] ✅ Token registered for user ${userId} (${platform})`);
+    console.log(`[FCM] ✅ Single token registered for user ${userId}`);
 
     return res.status(200).json({
       success: true,
@@ -80,17 +58,14 @@ exports.registerFcmToken = async (req, res) => {
 exports.removeFcmToken = async (req, res) => {
   try {
     if (!req.user || !req.user.id) {
-      return res.status(401).json({ success: false, message: 'Unauthorized: Invalid session' });
+      return res.status(401).json({ success: false, message: 'Unauthorized' });
     }
 
     const userId = req.user.id;
     const { token } = req.body;
 
     if (!token) {
-      return res.status(400).json({
-        success: false,
-        message: 'Token is required',
-      });
+      return res.status(400).json({ success: false, message: 'Token is required' });
     }
 
     await User.updateOne(
@@ -110,7 +85,7 @@ exports.removeFcmToken = async (req, res) => {
 };
 
 // ─────────────────────────────────
-// GET /api/notifications/fcm-tokens (DEBUG)
+// GET /api/notifications/fcm-tokens
 // ─────────────────────────────────
 exports.listFcmTokens = async (req, res) => {
   try {
@@ -127,7 +102,6 @@ exports.listFcmTokens = async (req, res) => {
       tokens: user.fcmTokens,
     });
   } catch (error) {
-    console.error('[FCM] List error:', error.message);
-    return res.status(500).json({ success: false, message: 'Server error while listing tokens' });
+    return res.status(500).json({ success: false, message: 'Server error' });
   }
 };
