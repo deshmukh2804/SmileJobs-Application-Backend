@@ -8,13 +8,15 @@ let isPolling = false;
 
 /**
  * Handles newly inserted job in database.
- * Auto-creates a Notification doc that targets candidates/job seekers.
+ * Auto-creates a Notification doc in MongoDB.
+ * NOTE: We DO NOT call processNotification() manually here, 
+ * because MongoDB insertion will automatically trigger the ChangeStream / Poller.
  */
 async function handleNewJob(job) {
   try {
     if (!job || !job._id) return;
 
-    // Prevent duplicate notifications for the same job
+    // Prevent duplicate notification creation for the same job ID
     const existing = await Notification.findOne({ 'data.jobId': String(job._id) });
     if (existing) return;
 
@@ -24,7 +26,7 @@ async function handleNewJob(job) {
 
     console.log(`[JobWatcher] 💼 New Job detected: "${job.title}" at ${company}`);
 
-    // Create notification targeting candidates
+    // Create notification document in DB
     const notif = await Notification.create({
       title: `🔥 New Job Alert: ${job.title}`,
       body: `${company} is hiring in ${city}${salary}. Tap to view & apply now!`,
@@ -45,14 +47,11 @@ async function handleNewJob(job) {
         salary: String(job.salary || ''),
       },
       status: 'sent',
-      pushProcessed: false,
+      pushProcessed: false, // Will be claimed atomically by processNotification
       sentAt: new Date(),
     });
 
-    console.log(`[JobWatcher] 📢 Notification document created: ${notif._id}`);
-
-    // Immediately attempt push
-    await processNotification(notif);
+    console.log(`[JobWatcher] 📢 Notification document created in DB: ${notif._id}`);
   } catch (err) {
     console.error('[JobWatcher] Error handling new job:', err.message);
   }
@@ -60,25 +59,44 @@ async function handleNewJob(job) {
 
 /**
  * Dispatches push notification to devices.
+ * Uses ATOMIC LOCKING to prevent duplicate sends!
  */
-async function processNotification(notif) {
+async function processNotification(notifOrId) {
   try {
-    if (!notif || notif.pushProcessed) return;
+    const notificationId = typeof notifOrId === 'object' ? notifOrId._id : notifOrId;
+    if (!notificationId) return;
 
-    if (notif.channels && notif.channels.push === false) {
-      await Notification.updateOne({ _id: notif._id }, { $set: { pushProcessed: true } });
-      return;
+    // 🔒 ATOMIC LOCK: Claim this notification immediately in MongoDB.
+    // If another thread/poller already set pushProcessed = true, targetDoc will be NULL.
+    const targetDoc = await Notification.findOneAndUpdate(
+      { 
+        _id: notificationId, 
+        pushProcessed: { $ne: true },
+        'channels.push': { $ne: false } 
+      },
+      { 
+        $set: { pushProcessed: true } 
+      },
+      { 
+        new: true 
+      }
+    );
+
+    // If targetDoc is null, it means it was ALREADY processed by ChangeStream/Poller! Abort.
+    if (!targetDoc) {
+      return; 
     }
 
-    console.log(`[Watcher] 🚀 Processing push for "${notif.title}" (Audience: ${notif.targetAudience})`);
+    console.log(`[Watcher] 🔒 Claimed lock for notification: "${targetDoc.title}" (${targetDoc._id})`);
+    console.log(`[Watcher] 🚀 Processing push dispatch...`);
 
-    const result = await pushForNotification(notif);
+    const result = await pushForNotification(targetDoc);
 
+    // Update stats after push is done
     await Notification.updateOne(
-      { _id: notif._id },
+      { _id: targetDoc._id },
       {
         $set: {
-          pushProcessed: true,
           'stats.pushSent': result.successCount || 0,
           'stats.pushFailed': result.failureCount || 0,
         },
@@ -91,15 +109,6 @@ async function processNotification(notif) {
     console.log(`[Watcher] 🏁 Finished dispatch: ${result.successCount} sent, ${result.failureCount} failed`);
   } catch (err) {
     console.error('[Watcher] Process error:', err.message);
-    try {
-      await Notification.updateOne(
-        { _id: notif._id },
-        {
-          $set: { pushProcessed: true },
-          $push: { errorLog: `[FCM Error] ${err.message}` },
-        }
-      );
-    } catch (_) {}
   }
 }
 
@@ -113,20 +122,18 @@ function startPolling() {
   const INTERVAL = 5000;
   const poll = async () => {
     try {
+      // Find notifications that haven't been processed yet
       const pending = await Notification.find({
         pushProcessed: { $ne: true },
         status: { $in: ['sent', 'pending'] },
         'channels.push': { $ne: false },
       })
+        .select('_id')
         .sort({ createdAt: 1 })
         .limit(10);
 
-      if (pending.length > 0) {
-        console.log(`[Watcher-Polling] Found ${pending.length} unprocessed notifications. Dispatching...`);
-      }
-
       for (const item of pending) {
-        await processNotification(item);
+        await processNotification(item._id);
       }
     } catch (err) {
       console.error('[Watcher-Polling] Poll error:', err.message);
@@ -136,7 +143,7 @@ function startPolling() {
   };
 
   poll();
-  console.log('✅ [Watcher] Polling service active (5s interval)');
+  console.log('✅ [Watcher] Polling fallback service active');
 }
 
 /**
@@ -151,12 +158,13 @@ function startChangeStream() {
 
     notifChangeStream.on('change', async (change) => {
       const doc = change.fullDocument;
-      if (doc) await processNotification(doc);
+      if (doc && doc._id) {
+        await processNotification(doc._id);
+      }
     });
 
     notifChangeStream.on('error', (err) => {
-      console.warn('[Watcher] Change stream unavailable/failed, maintaining polling fallback:', err.message);
-      startPolling();
+      console.warn('[Watcher] Notification change stream error, running polling:', err.message);
     });
 
     jobChangeStream = Job.watch(
@@ -174,10 +182,10 @@ function startChangeStream() {
     });
 
     console.log('✅ [Watcher] Real-Time MongoDB Change Stream active');
-    startPolling(); // Always run polling alongside as a fail-safe on cloud platforms
+    startPolling(); // Polling runs safely now thanks to atomic locking
     return true;
   } catch (err) {
-    console.warn('[Watcher] Change stream init error, starting polling fallback:', err.message);
+    console.warn('[Watcher] Change stream init error, fallback to polling:', err.message);
     startPolling();
     return false;
   }
