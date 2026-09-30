@@ -12,9 +12,12 @@ const { initSocket } = require('./src/socketService');
 // force-load cloudinary early so you see logs
 require('./src/config/cloudinary');
 
-// ✅ ADD: Initialize Firebase Admin at startup (production-safe)
+// ✅ Initialize Firebase Admin at startup (production-safe)
 const { initFirebaseAdmin } = require('./src/config/firebaseAdmin');
 initFirebaseAdmin();
+
+// ✅ Notification watcher (FCM push for new jobs + admin notifications)
+const { startNotificationWatcher } = require('./src/services/notificationWatcher');
 
 connectDB();
 
@@ -36,4 +39,15 @@ server.listen(PORT, '0.0.0.0', () => {
   ║   ☁️  Cloud: ${process.env.CLOUDINARY_CLOUD_NAME || 'MISSING'}      ║
   ╚══════════════════════════════════════════╝
   `);
+
+  // ✅ CRITICAL: Start push notification watcher AFTER server is up
+  // Waits briefly so MongoDB connection can finish first
+  setTimeout(() => {
+    try {
+      startNotificationWatcher();
+      console.log('🔔 [NotificationWatcher] Started — polling + change streams active');
+    } catch (err) {
+      console.error('❌ [NotificationWatcher] Failed to start:', err.message);
+    }
+  }, 3000);
 });

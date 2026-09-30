@@ -18,15 +18,15 @@ function safeString(val) {
 function buildJobNotificationTemplate(doc, userName = '') {
   const d = doc.data || {};
 
-  const hrName = safeString(d.hrName || 'HR');
-  const jobRole = safeString(d.jobRole || d.title || doc.title);
-  const salary = safeString(d.salary || d.salaryRange);
+  const hrName   = safeString(d.hrName || 'HR');
+  const jobRole  = safeString(d.jobRole || d.title || doc.title);
+  const salary   = safeString(d.salary || d.salaryRange);
   const location = safeString(d.location || d.subLocation);
-  const city = safeString(d.city || doc.targetCity);
-  const company = safeString(d.company || d.companyName);
+  const city     = safeString(d.city || doc.targetCity);
+  const company  = safeString(d.company || d.companyName);
 
   let title = safeString(doc.title);
-  if (!title) {
+  if (!title || title.trim() === '') {
     title = userName
       ? `${userName}, ${hrName} already reviewed your profile.`
       : company
@@ -35,12 +35,12 @@ function buildJobNotificationTemplate(doc, userName = '') {
   }
 
   let body = safeString(doc.body);
-  if (!body) {
+  if (!body || body.trim() === '') {
     const parts = [];
-    if (jobRole) parts.push(jobRole);
-    if (salary) parts.push(`Salary : ${salary}`);
+    if (jobRole)  parts.push(`${jobRole}`);
+    if (salary)   parts.push(`Salary : ${salary}`);
     if (location) parts.push(`Location : ${location}`);
-    if (city) parts.push(`City : ${city}`);
+    if (city)     parts.push(`City : ${city}`);
     parts.push('');
     parts.push('VIEW DETAILS');
     body = parts.join('\n');
@@ -50,10 +50,8 @@ function buildJobNotificationTemplate(doc, userName = '') {
 }
 
 function buildPushNotificationTemplate(doc, userName = '') {
-  const title =
-    safeString(doc.title) ||
-    (userName ? `Hello ${userName}, new update available 📬` : 'New update available 📬');
-  const body = safeString(doc.body) || 'Tap to view details.';
+  const title = safeString(doc.title) || (userName ? `Hello ${userName}, new update available 📬` : 'New update available 📬');
+  const body  = safeString(doc.body) || 'Tap to view details.';
   return { title, body };
 }
 
@@ -77,7 +75,7 @@ async function sendToTokens(tokens, notification, data = {}) {
   const tokenArray = (Array.isArray(tokens) ? tokens : [tokens]).filter(Boolean);
 
   if (!tokenArray.length) {
-    return { success: false, message: 'No tokens', successCount: 0, failureCount: 0 };
+    return { success: false, message: 'No tokens provided', successCount: 0, failureCount: 0 };
   }
 
   const stringifiedData = {};
@@ -85,9 +83,8 @@ async function sendToTokens(tokens, notification, data = {}) {
     stringifiedData[key] = String(data[key] ?? '');
   });
 
-  // Ensure title/body also in data (helps some Android OEMs + cold start)
   stringifiedData.title = String(notification.title || '');
-  stringifiedData.body = String(notification.body || '');
+  stringifiedData.body  = String(notification.body || '');
 
   const messagePayload = {
     notification: {
@@ -106,7 +103,6 @@ async function sendToTokens(tokens, notification, data = {}) {
         visibility: 'public',
         defaultSound: true,
         defaultVibrateTimings: true,
-        clickAction: 'FLUTTER_NOTIFICATION_CLICK',
         ...(notification.imageUrl ? { imageUrl: notification.imageUrl } : {}),
       },
     },
@@ -118,7 +114,6 @@ async function sendToTokens(tokens, notification, data = {}) {
             body: notification.body || '',
           },
           sound: 'default',
-          contentAvailable: true,
         },
       },
     },
@@ -130,9 +125,7 @@ async function sendToTokens(tokens, notification, data = {}) {
     let totalFailure = 0;
     const invalidTokens = [];
 
-    console.log(`[FCM] 📤 Sending to ${tokenArray.length} token(s)...`);
-    console.log(`[FCM] Title: ${messagePayload.notification.title}`);
-    console.log(`[FCM] Body: ${messagePayload.notification.body?.substring(0, 80)}...`);
+    console.log(`[FCM] 📤 Sending payload to ${tokenArray.length} token(s)...`);
 
     for (let i = 0; i < tokenArray.length; i += CHUNK_SIZE) {
       const chunk = tokenArray.slice(i, i + CHUNK_SIZE);
@@ -147,7 +140,7 @@ async function sendToTokens(tokens, notification, data = {}) {
       response.responses.forEach((res, idx) => {
         if (!res.success) {
           const errorCode = res.error?.code || '';
-          console.log(`[FCM] ❌ Token fail: ${errorCode} | ${res.error?.message}`);
+          console.log(`[FCM] ❌ Token error: ${errorCode} - ${res.error?.message}`);
           if (
             errorCode === 'messaging/invalid-registration-token' ||
             errorCode === 'messaging/registration-token-not-registered'
@@ -155,7 +148,7 @@ async function sendToTokens(tokens, notification, data = {}) {
             invalidTokens.push(chunk[idx]);
           }
         } else {
-          console.log(`[FCM] ✅ Delivered messageId: ${res.messageId}`);
+          console.log(`[FCM] ✅ Delivered to device! Message ID: ${res.messageId}`);
         }
       });
     }
@@ -167,8 +160,6 @@ async function sendToTokens(tokens, notification, data = {}) {
       );
       console.log(`[FCM] 🧹 Cleaned ${invalidTokens.length} expired tokens`);
     }
-
-    console.log(`[FCM] Done → success=${totalSuccess} fail=${totalFailure}`);
 
     return {
       success: totalSuccess > 0,
@@ -182,78 +173,51 @@ async function sendToTokens(tokens, notification, data = {}) {
   }
 }
 
+/**
+ * Broad & resilient target resolver to guarantee matching logged-in users.
+ */
 async function resolveTargetUsers(notificationDoc) {
-  const {
-    targetAudience,
-    targetUserIds = [],
-    targetCity,
-    targetRole,
-    filters = {},
-  } = notificationDoc;
+  const audience = String(notificationDoc.targetAudience || 'all').toLowerCase().trim();
+  const targetRole = String(notificationDoc.targetRole || '').toLowerCase().trim();
 
-  // Must have at least one FCM token
+  // Base requirement: User must have registered an FCM token
   let query = { 'fcmTokens.0': { $exists: true } };
 
-  const audience = (targetAudience || 'all').toLowerCase();
-
-  switch (audience) {
-    case 'all':
-      break;
-
-    case 'candidates':
-    case 'candidate':
-    case 'job_seeker':
-    case 'job_seekers':
-      // Support multiple role naming conventions in DB
-      query.role = { $in: ['job_seeker', 'candidate', 'user', 'seeker'] };
-      break;
-
-    case 'recruiters':
-    case 'recruiter':
-      query.role = { $in: ['recruiter', 'employer', 'hr'] };
-      break;
-
-    case 'specific':
-      if (targetUserIds?.length > 0) {
-        query._id = { $in: targetUserIds };
-      }
-      break;
-
-    case 'city':
-      if (targetCity) {
+  if (audience === 'all') {
+    // Send to every device with a registered token
+  } else if (['candidates', 'candidate', 'job_seeker', 'job_seekers'].includes(audience)) {
+    query.$or = [
+      { role: { $in: ['job_seeker', 'candidate', 'user', 'seeker', ''] } },
+      { role: { $exists: false } },
+    ];
+  } else if (['recruiters', 'recruiter', 'hr'].includes(audience)) {
+    query.role = { $in: ['recruiter', 'employer', 'hr'] };
+  } else if (audience === 'specific') {
+    if (notificationDoc.targetUserIds?.length > 0) {
+      query._id = { $in: notificationDoc.targetUserIds };
+    }
+  } else if (audience === 'city') {
+    if (notificationDoc.targetCity) {
+      query.$or = [
+        { city: new RegExp(`^${notificationDoc.targetCity}$`, 'i') },
+        { 'location.city': new RegExp(`^${notificationDoc.targetCity}$`, 'i') },
+      ];
+    }
+  } else if (audience === 'role') {
+    if (targetRole) {
+      if (['job_seeker', 'candidate', 'seeker', 'user'].includes(targetRole)) {
         query.$or = [
-          { city: new RegExp(`^${targetCity}$`, 'i') },
-          { 'location.city': new RegExp(`^${targetCity}$`, 'i') },
+          { role: { $in: ['job_seeker', 'candidate', 'user', 'seeker', ''] } },
+          { role: { $exists: false } },
         ];
+      } else {
+        query.role = new RegExp(`^${targetRole}$`, 'i');
       }
-      break;
-
-    case 'role':
-      if (targetRole) {
-        const role = String(targetRole).toLowerCase();
-        if (['job_seeker', 'candidate', 'seeker', 'user'].includes(role)) {
-          query.role = { $in: ['job_seeker', 'candidate', 'user', 'seeker'] };
-        } else {
-          query.role = targetRole;
-        }
-      }
-      break;
-
-    case 'skills':
-      if (filters?.skills?.length > 0) {
-        query.skills = { $in: filters.skills };
-      }
-      break;
-
-    default:
-      break;
+    }
   }
 
   const users = await User.find(query).select('fcmTokens name role city').lean();
-  console.log(`[FCM] 🎯 Audience="${audience}" matched ${users.length} user(s) with tokens`);
-  if (users.length === 0) {
-    console.log(`[FCM] ⚠️ Query was:`, JSON.stringify(query));
-  }
+  console.log(`[FCM Resolver] Audience: "${audience}", Targeted Devices: ${users.length} user(s)`);
   return users;
 }
 
@@ -261,10 +225,10 @@ async function pushForNotification(notificationDoc) {
   const users = await resolveTargetUsers(notificationDoc);
 
   if (!users.length) {
-    console.log('[FCM] ⚠️ No targeted users found with active tokens.');
+    console.log('[FCM] ⚠️ No target users found with registered FCM tokens.');
     return {
       success: false,
-      message: 'No registered user devices found for targeted audience',
+      message: 'No active user devices found matching target filters',
       successCount: 0,
       failureCount: 0,
     };
@@ -277,10 +241,7 @@ async function pushForNotification(notificationDoc) {
   let failureCount = 0;
   let invalidTokensRemoved = 0;
 
-  // Personalized (or normal) path
   if (!isBulkSend) {
-    console.log(`[FCM] Dispatching to ${users.length} users...`);
-
     for (const u of users) {
       const tokens = (u.fcmTokens || []).map((t) => t.token).filter(Boolean);
       if (!tokens.length) continue;
@@ -310,8 +271,6 @@ async function pushForNotification(notificationDoc) {
     return { success: successCount > 0, successCount, failureCount, invalidTokensRemoved };
   }
 
-  // Bulk path
-  console.log(`[FCM] Bulk multicast to ${users.length} recipients...`);
   const { title, body } = buildTemplate(notificationDoc, '');
   const allTokens = users.flatMap((u) => (u.fcmTokens || []).map((t) => t.token).filter(Boolean));
 

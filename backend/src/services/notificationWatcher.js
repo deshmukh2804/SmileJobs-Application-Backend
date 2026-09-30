@@ -6,10 +6,15 @@ let notifChangeStream = null;
 let jobChangeStream = null;
 let isPolling = false;
 
+/**
+ * Handles newly inserted job in database.
+ * Auto-creates a Notification doc that targets candidates/job seekers.
+ */
 async function handleNewJob(job) {
   try {
     if (!job || !job._id) return;
 
+    // Prevent duplicate notifications for the same job
     const existing = await Notification.findOne({ 'data.jobId': String(job._id) });
     if (existing) return;
 
@@ -19,13 +24,18 @@ async function handleNewJob(job) {
 
     console.log(`[JobWatcher] 💼 New Job detected: "${job.title}" at ${company}`);
 
+    // Create notification targeting candidates
     const notif = await Notification.create({
       title: `🔥 New Job Alert: ${job.title}`,
       body: `${company} is hiring in ${city}${salary}. Tap to view & apply now!`,
-      targetAudience: 'candidates', // broader than role/job_seeker only
+      targetAudience: 'candidates',
       targetRole: 'job_seeker',
       type: 'job_alert',
-      channels: { inApp: true, push: true, email: false },
+      channels: {
+        inApp: true,
+        push: true,
+        email: false,
+      },
       data: {
         type: 'JOB',
         jobId: String(job._id),
@@ -39,15 +49,18 @@ async function handleNewJob(job) {
       sentAt: new Date(),
     });
 
-    console.log(`[JobWatcher] 📢 Notification created: ${notif._id}`);
+    console.log(`[JobWatcher] 📢 Notification document created: ${notif._id}`);
 
-    // Always try push immediately as well
+    // Immediately attempt push
     await processNotification(notif);
   } catch (err) {
     console.error('[JobWatcher] Error handling new job:', err.message);
   }
 }
 
+/**
+ * Dispatches push notification to devices.
+ */
 async function processNotification(notif) {
   try {
     if (!notif || notif.pushProcessed) return;
@@ -57,7 +70,7 @@ async function processNotification(notif) {
       return;
     }
 
-    console.log(`[Watcher] 🚀 Push → "${notif.title}" | audience=${notif.targetAudience}`);
+    console.log(`[Watcher] 🚀 Processing push for "${notif.title}" (Audience: ${notif.targetAudience})`);
 
     const result = await pushForNotification(notif);
 
@@ -75,7 +88,7 @@ async function processNotification(notif) {
       }
     );
 
-    console.log(`[Watcher] 🏁 pushSent=${result.successCount} pushFailed=${result.failureCount}`);
+    console.log(`[Watcher] 🏁 Finished dispatch: ${result.successCount} sent, ${result.failureCount} failed`);
   } catch (err) {
     console.error('[Watcher] Process error:', err.message);
     try {
@@ -90,6 +103,45 @@ async function processNotification(notif) {
   }
 }
 
+/**
+ * Fallback polling every 5s to process any pending notifications.
+ */
+function startPolling() {
+  if (isPolling) return;
+  isPolling = true;
+
+  const INTERVAL = 5000;
+  const poll = async () => {
+    try {
+      const pending = await Notification.find({
+        pushProcessed: { $ne: true },
+        status: { $in: ['sent', 'pending'] },
+        'channels.push': { $ne: false },
+      })
+        .sort({ createdAt: 1 })
+        .limit(10);
+
+      if (pending.length > 0) {
+        console.log(`[Watcher-Polling] Found ${pending.length} unprocessed notifications. Dispatching...`);
+      }
+
+      for (const item of pending) {
+        await processNotification(item);
+      }
+    } catch (err) {
+      console.error('[Watcher-Polling] Poll error:', err.message);
+    } finally {
+      setTimeout(poll, INTERVAL);
+    }
+  };
+
+  poll();
+  console.log('✅ [Watcher] Polling service active (5s interval)');
+}
+
+/**
+ * Starts MongoDB Change Stream for Notifications and Jobs.
+ */
 function startChangeStream() {
   try {
     notifChangeStream = Notification.watch(
@@ -103,11 +155,7 @@ function startChangeStream() {
     });
 
     notifChangeStream.on('error', (err) => {
-      console.warn('[Watcher] Notif stream error → polling:', err.message);
-      if (notifChangeStream) {
-        try { notifChangeStream.close(); } catch (_) {}
-        notifChangeStream = null;
-      }
+      console.warn('[Watcher] Change stream unavailable/failed, maintaining polling fallback:', err.message);
       startPolling();
     });
 
@@ -122,62 +170,23 @@ function startChangeStream() {
     });
 
     jobChangeStream.on('error', (err) => {
-      console.warn('[Watcher] Job stream error:', err.message);
-      if (jobChangeStream) {
-        try { jobChangeStream.close(); } catch (_) {}
-        jobChangeStream = null;
-      }
+      console.warn('[Watcher] Job change stream warning:', err.message);
     });
 
-    console.log('✅ [Watcher] Change streams active (Notifications + Jobs)');
-    // Also start polling as safety net (Render / some clusters drop streams)
-    startPolling();
+    console.log('✅ [Watcher] Real-Time MongoDB Change Stream active');
+    startPolling(); // Always run polling alongside as a fail-safe on cloud platforms
     return true;
   } catch (err) {
-    console.warn('[Watcher] Change stream unavailable:', err.message);
+    console.warn('[Watcher] Change stream init error, starting polling fallback:', err.message);
+    startPolling();
     return false;
   }
 }
 
-function startPolling() {
-  if (isPolling) return;
-  isPolling = true;
-
-  const INTERVAL = 5000;
-
-  const poll = async () => {
-    try {
-      const pending = await Notification.find({
-        pushProcessed: { $ne: true },
-        status: { $in: ['sent', 'pending'] },
-        'channels.push': { $ne: false },
-      })
-        .sort({ createdAt: 1 })
-        .limit(10);
-
-      if (pending.length) {
-        console.log(`[Watcher-Poll] Found ${pending.length} pending push(es)`);
-      }
-
-      for (const item of pending) {
-        await processNotification(item);
-      }
-    } catch (err) {
-      console.error('[Watcher-Polling] error:', err.message);
-    } finally {
-      setTimeout(poll, INTERVAL);
-    }
-  };
-
-  poll();
-  console.log('✅ [Watcher] Polling active (every 5s)');
-}
-
 function startNotificationWatcher() {
   setTimeout(() => {
-    const started = startChangeStream();
-    if (!started) startPolling();
-  }, 2000);
+    startChangeStream();
+  }, 1000);
 }
 
 module.exports = {
