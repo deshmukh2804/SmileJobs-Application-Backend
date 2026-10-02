@@ -1,6 +1,7 @@
 const Application = require('../models/Application');
 const Job = require('../models/Job');
 const User = require('../models/User');
+const { sendDirectNotificationToUser } = require('../services/notificationService');
 
 // ═══════════════════════════════════════════════════════════════
 // HELPER: Calculate skill match percentage
@@ -31,55 +32,88 @@ function getStatusBadge(status) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// HELPER: Map status to notification type
+// ═══════════════════════════════════════════════════════════════
+function statusToNotificationType(status) {
+  const map = {
+    Viewed: 'profile_review',
+    Shortlisted: 'application_shortlisted',
+    Interview: 'application_interview',
+    Offered: 'application_offered',
+    Hired: 'application_hired',
+    Rejected: 'application_rejected',
+  };
+  return map[status] || null;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 🚀 NEW: Send status change notification to candidate
+// Mirrors the WorkIndia-style template shown in the image
+// ═══════════════════════════════════════════════════════════════
+async function sendStatusChangeNotification(application, newStatus) {
+  try {
+    const notifType = statusToNotificationType(newStatus);
+    if (!notifType) {
+      console.log(`[STATUS-NOTIF] No notification configured for status: ${newStatus}`);
+      return;
+    }
+
+    // Fetch LATEST job data (for accurate HR name, salary, location)
+    const job = await Job.findById(application.jobId).lean();
+    if (!job) {
+      console.log('[STATUS-NOTIF] Job not found, skipping notification');
+      return;
+    }
+
+    const notificationData = {
+      type: notifType,
+      _id: `status_${application._id}_${Date.now()}`,
+      data: {
+        // Pass raw objects — notificationService.js will format them properly
+        jobId: String(application.jobId),
+        applicationId: String(application._id),
+        hrName: job.contactPerson?.name || application.jobHrName || 'HR',
+        jobRole: job.title || application.jobTitle || '',
+        title: job.title || application.jobTitle || '',
+        salary: job.salary || null,  // raw object → formatSalary() will handle it
+        location: job.location || null, // raw object → extractors will handle it
+        city: job.location?.city || '',
+        company: job.companyName || application.jobCompany || '',
+        companyName: job.companyName || application.jobCompany || '',
+        status: newStatus,
+      },
+      imageUrl: job.companyLogo?.url || '',
+    };
+
+    const result = await sendDirectNotificationToUser(application.userId, notificationData);
+    console.log(`[STATUS-NOTIF] ✅ Sent "${newStatus}" notification to user ${application.userId}:`, result);
+  } catch (err) {
+    console.error('[STATUS-NOTIF] ❌ Failed:', err.message);
+    // Don't throw — notification failure shouldn't block status update
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // HELPER: Build dynamic milestones based on current status
-// Reflects real-time progress from admin/recruiter panel
 // ═══════════════════════════════════════════════════════════════
 function buildMilestones(app) {
   const status = app.status;
   const isTerminal = ['Rejected', 'Withdrawn'].includes(status);
 
-  // Base workflow stages
   const stages = [
-    {
-      key: 'Applied',
-      title: 'Application Submitted',
-      time: app.appliedAt ? formatDate(app.appliedAt) : 'Just now',
-    },
-    {
-      key: 'Viewed',
-      title: 'HR Viewed Your Profile',
-      time: app.viewedAt ? formatDate(app.viewedAt) : null,
-    },
-    {
-      key: 'Shortlisted',
-      title: 'Shortlisted for Next Round',
-      time: app.shortlistedAt ? formatDate(app.shortlistedAt) : null,
-    },
-    {
-      key: 'Interview',
-      title: 'Interview Scheduled',
-      time: app.interviewAt ? formatDate(app.interviewAt) : null,
-    },
-    {
-      key: 'Offered',
-      title: 'Offer Extended',
-      time: app.offeredAt ? formatDate(app.offeredAt) : null,
-    },
-    {
-      key: 'Hired',
-      title: 'Successfully Hired',
-      time: app.hiredAt ? formatDate(app.hiredAt) : null,
-    },
+    { key: 'Applied', title: 'Application Submitted', time: app.appliedAt ? formatDate(app.appliedAt) : 'Just now' },
+    { key: 'Viewed', title: 'HR Viewed Your Profile', time: app.viewedAt ? formatDate(app.viewedAt) : null },
+    { key: 'Shortlisted', title: 'Shortlisted for Next Round', time: app.shortlistedAt ? formatDate(app.shortlistedAt) : null },
+    { key: 'Interview', title: 'Interview Scheduled', time: app.interviewAt ? formatDate(app.interviewAt) : null },
+    { key: 'Offered', title: 'Offer Extended', time: app.offeredAt ? formatDate(app.offeredAt) : null },
+    { key: 'Hired', title: 'Successfully Hired', time: app.hiredAt ? formatDate(app.hiredAt) : null },
   ];
 
   const stageOrder = ['Applied', 'Viewed', 'Shortlisted', 'Interview', 'Offered', 'Hired'];
   const currentIndex = stageOrder.indexOf(status);
 
-  // If rejected/withdrawn, mark only completed stages up to that point
   if (isTerminal) {
-    const milestones = stages.map((stage, idx) => {
-      const stageIdx = stageOrder.indexOf(stage.key);
-      // Mark stages completed based on the timestamps
+    const milestones = stages.map((stage) => {
       const wasCompleted =
         stage.key === 'Applied' ||
         (stage.key === 'Viewed' && app.viewedAt) ||
@@ -95,7 +129,6 @@ function buildMilestones(app) {
       };
     });
 
-    // Add rejection/withdrawal milestone
     milestones.push({
       title: status === 'Rejected' ? 'Application Not Selected' : 'Application Withdrawn',
       time: app.updatedAt ? formatDate(app.updatedAt) : '',
@@ -106,15 +139,13 @@ function buildMilestones(app) {
     return milestones;
   }
 
-  // Normal flow — mark stages up to and including current as completed
-  return stages.map((stage, idx) => {
+  return stages.map((stage) => {
     const stageIdx = stageOrder.indexOf(stage.key);
     const isCompleted = stageIdx <= currentIndex;
     const isCurrent = stageIdx === currentIndex;
-
     return {
       title: stage.title,
-      time: stage.time || (isCompleted ? '' : ''),
+      time: stage.time || '',
       completed: isCompleted,
       statusText: isCurrent ? 'Current Stage' : '',
       isHighlight: isCurrent,
@@ -140,33 +171,18 @@ function formatDate(date) {
   if (diffDays === 1) return 'Yesterday';
   if (diffDays < 7) return `${diffDays} days ago`;
 
-  return d.toLocaleDateString('en-IN', {
-    day: 'numeric',
-    month: 'short',
-    year: 'numeric',
-  });
+  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
-// ═══════════════════════════════════════════════════════════════
-// HELPER: Extract initials from name
-// ═══════════════════════════════════════════════════════════════
 function getInitials(name) {
   if (!name) return 'HR';
-  return String(name)
-    .split(' ')
-    .filter(Boolean)
-    .map((s) => s[0])
-    .slice(0, 2)
-    .join('')
-    .toUpperCase();
+  return String(name).split(' ').filter(Boolean).map((s) => s[0]).slice(0, 2).join('').toUpperCase();
 }
 
 // ═══════════════════════════════════════════════════════════════
-// HELPER: Transform application document to mobile-friendly format
-// Fetches LATEST job data to reflect real-time recruiter settings
+// HELPER: Transform application → mobile format
 // ═══════════════════════════════════════════════════════════════
 async function transformApplication(app) {
-  // Fetch latest job data (to get real-time contact visibility settings)
   let latestJob = null;
   try {
     latestJob = await Job.findById(app.jobId).lean();
@@ -174,24 +190,17 @@ async function transformApplication(app) {
     console.log('[TRANSFORM] Could not fetch latest job:', err.message);
   }
 
-  // Determine contact visibility from LIVE job data (fallback to snapshot)
   const contactVisibility = latestJob?.contactVisibility || { whatsapp: true, mobile: true };
   const whatsappContactEnabled = latestJob?.whatsappContactEnabled !== false;
 
-  // Get status badge & category (auto-computed based on current status)
   const badge = getStatusBadge(app.status);
-
-  // Build dynamic milestones based on real-time status
   const milestones = buildMilestones(app);
 
-  // Get latest HR contact info from job (in case recruiter updated it)
   const hrName = latestJob?.contactPerson?.name || app.jobHrName || 'HR Team';
   const hrRole = latestJob?.contactPerson?.designation || app.jobHrRole || 'Recruiter';
   const hrPhone = latestJob?.recruiterMobileNumber || app.jobHrPhone || '';
   const hrWhatsapp = latestJob?.recruiterWhatsappNumber || app.jobHrWhatsapp || '';
 
-  // ✅ Contact permissions from LIVE job settings
-  // Recruiter can toggle these anytime from their panel
   const phoneEnabled = contactVisibility.mobile !== false && !!hrPhone;
   const whatsappEnabled =
     contactVisibility.whatsapp !== false &&
@@ -212,10 +221,7 @@ async function transformApplication(app) {
     category: badge.category,
     matchPercentage: app.matchPercentage,
     status: app.status,
-    statusBadge: {
-      text: badge.text,
-      isHighlighted: badge.isHighlighted,
-    },
+    statusBadge: { text: badge.text, isHighlighted: badge.isHighlighted },
     milestones,
     hrContact: {
       name: hrName,
@@ -223,8 +229,8 @@ async function transformApplication(app) {
       initials: getInitials(hrName),
       phone: hrPhone,
       whatsapp: hrWhatsapp || hrPhone,
-      whatsappEnabled,   // ✅ Real-time from job settings
-      phoneEnabled,      // ✅ Real-time from job settings
+      whatsappEnabled,
+      phoneEnabled,
       expectedReply: 'Application received. Expected reply within 24h',
     },
     hrNotes: app.hrNotes || '',
@@ -246,29 +252,18 @@ exports.applyToJob = async (req, res) => {
     const { jobId, coverNote } = req.body;
 
     if (!jobId) {
-      console.log('[APPLY] ERROR: No jobId in request body');
       return res.status(400).json({ success: false, message: 'Job ID is required' });
     }
 
-    // Step 1: Find the job
-    console.log('[APPLY] Looking for job:', jobId);
     const job = await Job.findById(jobId);
-    if (!job) {
-      console.log('[APPLY] ERROR: Job not found in DB');
-      return res.status(404).json({ success: false, message: 'Job not found' });
-    }
-    console.log('[APPLY] Job found:', job.title, 'at', job.companyName);
-    console.log('[APPLY] Job status:', job.status, 'isActive:', job.isActive);
+    if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
 
     if (job.status !== 'Live' || !job.isActive) {
-      console.log('[APPLY] ERROR: Job is not live');
       return res.status(400).json({ success: false, message: 'Job is no longer active' });
     }
 
-    // Step 2: Check duplicate
     const existing = await Application.findOne({ jobId, userId });
     if (existing) {
-      console.log('[APPLY] User already applied. Application ID:', existing._id);
       return res.status(409).json({
         success: false,
         message: 'You have already applied for this job',
@@ -276,20 +271,10 @@ exports.applyToJob = async (req, res) => {
       });
     }
 
-    // Step 3: Fetch user profile
-    console.log('[APPLY] Fetching user profile for:', userId);
     const user = await User.findById(userId);
-    if (!user) {
-      console.log('[APPLY] ERROR: User not found in DB');
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
-    console.log('[APPLY] User found:', user.name, user.phoneNumber);
-    console.log('[APPLY] User skills:', user.skills);
-    console.log('[APPLY] User resume:', user.resumeUrl ? 'YES' : 'NO');
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
 
-    // Step 4: Validate profile
     if (!user.name || !user.phoneNumber) {
-      console.log('[APPLY] ERROR: Incomplete profile');
       return res.status(400).json({
         success: false,
         message: 'Please complete your profile (name and phone) before applying',
@@ -298,7 +283,6 @@ exports.applyToJob = async (req, res) => {
     }
 
     if (!user.resumeUrl) {
-      console.log('[APPLY] ERROR: No resume uploaded');
       return res.status(400).json({
         success: false,
         message: 'Please upload your resume before applying',
@@ -306,12 +290,8 @@ exports.applyToJob = async (req, res) => {
       });
     }
 
-    // Step 5: Calculate match
     const matchPercentage = calculateMatch(job.skills || [], user.skills || []);
-    console.log('[APPLY] Match percentage:', matchPercentage);
 
-    // Step 6: Create application
-    console.log('[APPLY] Creating application document...');
     const application = await Application.create({
       jobId,
       userId,
@@ -356,31 +336,14 @@ exports.applyToJob = async (req, res) => {
       status: 'Applied',
       category: 'pending',
       milestones: [
-        {
-          title: 'Applied successfully',
-          time: 'Today, Just now',
-          completed: true,
-          isHighlight: true,
-        },
-        {
-          title: 'Direct HR Review Scheduled',
-          statusText: 'In Pipeline',
-          completed: false,
-        },
+        { title: 'Applied successfully', time: 'Today, Just now', completed: true, isHighlight: true },
+        { title: 'Direct HR Review Scheduled', statusText: 'In Pipeline', completed: false },
       ],
       appliedAt: new Date(),
     });
 
-    console.log('[APPLY] Application created successfully! ID:', application._id);
-
-    // Step 7: Increment applicants count
+    console.log('[APPLY] Application created! ID:', application._id);
     await Job.findByIdAndUpdate(jobId, { $inc: { applicantsCount: 1 } });
-    console.log('[APPLY] Job applicants count incremented');
-
-    // Step 8: Verify it was saved
-    const verify = await Application.findById(application._id);
-    console.log('[APPLY] Verification - saved in DB:', verify ? 'YES' : 'NO');
-    console.log('==========================================\n');
 
     res.status(201).json({
       success: true,
@@ -395,7 +358,6 @@ exports.applyToJob = async (req, res) => {
     });
   } catch (error) {
     console.log('[APPLY] CRITICAL ERROR:', error.message);
-    console.log('[APPLY] Error stack:', error.stack);
     if (error.code === 11000) {
       return res.status(409).json({
         success: false,
@@ -408,29 +370,15 @@ exports.applyToJob = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════
-// GET /api/v1/applications/my — Get my applications
-// ✅ NOW SYNCS WITH ADMIN/RECRUITER STATUS CHANGES IN REAL-TIME
+// GET /api/v1/applications/my
 // ═══════════════════════════════════════════════════════════════
 exports.getMyApplications = async (req, res) => {
-  console.log('\n[MY-APPS] Fetching applications for user:', req.user?.id);
-
   try {
     const userId = req.user.id;
+    const applications = await Application.find({ userId }).sort({ appliedAt: -1 }).lean();
 
-    // Fetch FRESH data from DB (no cache) — this ensures admin/recruiter
-    // status changes appear immediately on next fetch
-    const applications = await Application.find({ userId })
-      .sort({ appliedAt: -1 })
-      .lean();
+    const transformed = await Promise.all(applications.map((app) => transformApplication(app)));
 
-    console.log('[MY-APPS] Found', applications.length, 'applications');
-
-    // Transform each application (fetches latest job data for real-time contact settings)
-    const transformed = await Promise.all(
-      applications.map((app) => transformApplication(app))
-    );
-
-    // Recompute counts based on latest categories (auto-updated by status)
     const counts = {
       all: transformed.length,
       pending: transformed.filter((a) => a.category === 'pending').length,
@@ -438,28 +386,19 @@ exports.getMyApplications = async (req, res) => {
       offers: transformed.filter((a) => a.category === 'offers').length,
     };
 
-    console.log('[MY-APPS] Counts:', JSON.stringify(counts));
-
-    // Send with cache-control headers to prevent stale data
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
     res.set('Pragma', 'no-cache');
     res.set('Expires', '0');
 
-    res.status(200).json({
-      success: true,
-      applications: transformed,
-      counts,
-      timestamp: Date.now(), // helps client detect fresh data
-    });
+    res.status(200).json({ success: true, applications: transformed, counts, timestamp: Date.now() });
   } catch (error) {
     console.log('[MY-APPS] ERROR:', error.message);
-    console.log('[MY-APPS] Stack:', error.stack);
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
 // ═══════════════════════════════════════════════════════════════
-// GET /api/v1/applications/:id — Get single application (with latest status)
+// GET /api/v1/applications/:id
 // ═══════════════════════════════════════════════════════════════
 exports.getApplicationById = async (req, res) => {
   try {
@@ -467,20 +406,12 @@ exports.getApplicationById = async (req, res) => {
     const { id } = req.params;
 
     const app = await Application.findOne({ _id: id, userId }).lean();
-    if (!app) {
-      return res.status(404).json({ success: false, message: 'Application not found' });
-    }
+    if (!app) return res.status(404).json({ success: false, message: 'Application not found' });
 
     const transformed = await transformApplication(app);
-
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
-    res.status(200).json({
-      success: true,
-      application: transformed,
-      timestamp: Date.now(),
-    });
+    res.status(200).json({ success: true, application: transformed, timestamp: Date.now() });
   } catch (error) {
-    console.log('[GET-APP] ERROR:', error.message);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -492,40 +423,26 @@ exports.checkApplied = async (req, res) => {
   try {
     const userId = req.user.id;
     const { jobId } = req.params;
-
     const existing = await Application.findOne({ jobId, userId }).lean();
-
-    res.status(200).json({
-      success: true,
-      applied: !!existing,
-      application: existing || null,
-    });
+    res.status(200).json({ success: true, applied: !!existing, application: existing || null });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
 // ═══════════════════════════════════════════════════════════════
-// GET /api/v1/applications/debug — Debug (dev use only)
+// GET /api/v1/applications/debug
 // ═══════════════════════════════════════════════════════════════
 exports.debugApplications = async (req, res) => {
   try {
     const total = await Application.countDocuments({});
     const all = await Application.find({}).sort({ appliedAt: -1 }).limit(20).lean();
-
-    console.log('[DEBUG] Total applications in DB:', total);
-
     res.status(200).json({
       success: true,
       total,
       applications: all.map((a) => ({
-        id: a._id,
-        user: a.userId,
-        job: a.jobId,
-        jobTitle: a.jobTitle,
-        candidate: a.candidateName,
-        status: a.status,
-        appliedAt: a.appliedAt,
+        id: a._id, user: a.userId, job: a.jobId, jobTitle: a.jobTitle,
+        candidate: a.candidateName, status: a.status, appliedAt: a.appliedAt,
       })),
     });
   } catch (error) {
@@ -534,26 +451,85 @@ exports.debugApplications = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════
-// DELETE /api/v1/applications/:id — Withdraw application
+// DELETE /api/v1/applications/:id — Withdraw
 // ═══════════════════════════════════════════════════════════════
 exports.withdrawApplication = async (req, res) => {
   try {
     const userId = req.user.id;
     const { id } = req.params;
-
     const app = await Application.findOne({ _id: id, userId });
-    if (!app) {
-      return res.status(404).json({ success: false, message: 'Application not found' });
-    }
+    if (!app) return res.status(404).json({ success: false, message: 'Application not found' });
 
     app.status = 'Withdrawn';
     app.category = 'expired';
     await app.save();
 
     await Job.findByIdAndUpdate(app.jobId, { $inc: { applicantsCount: -1 } });
-
     res.status(200).json({ success: true, message: 'Application withdrawn' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
+// ═══════════════════════════════════════════════════════════════
+// 🚀 NEW: PATCH /api/v1/applications/:id/status
+// Called by admin/recruiter to update application status
+// → Automatically triggers push notification to candidate
+// ═══════════════════════════════════════════════════════════════
+exports.updateApplicationStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, hrNotes } = req.body;
+
+    const validStatuses = ['Applied', 'Viewed', 'Shortlisted', 'Interview', 'Offered', 'Hired', 'Rejected'];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ success: false, message: 'Invalid status' });
+    }
+
+    const app = await Application.findById(id);
+    if (!app) return res.status(404).json({ success: false, message: 'Application not found' });
+
+    const previousStatus = app.status;
+    if (previousStatus === status) {
+      return res.status(200).json({ success: true, message: 'Status already set', unchanged: true });
+    }
+
+    // Update status + timestamp
+    app.status = status;
+    const badge = getStatusBadge(status);
+    app.category = badge.category;
+
+    const now = new Date();
+    const timestampMap = {
+      Viewed: 'viewedAt',
+      Shortlisted: 'shortlistedAt',
+      Interview: 'interviewAt',
+      Offered: 'offeredAt',
+      Hired: 'hiredAt',
+    };
+    if (timestampMap[status]) app[timestampMap[status]] = now;
+
+    if (hrNotes !== undefined) app.hrNotes = hrNotes;
+
+    await app.save();
+
+    console.log(`[STATUS-UPDATE] ${previousStatus} → ${status} for application ${id}`);
+
+    // 🚀 Fire push notification (non-blocking)
+    sendStatusChangeNotification(app, status).catch((err) => {
+      console.error('[STATUS-UPDATE] Notification error (non-blocking):', err.message);
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `Status updated from ${previousStatus} to ${status}`,
+      application: await transformApplication(app.toObject()),
+    });
+  } catch (error) {
+    console.error('[STATUS-UPDATE] ERROR:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Export helper for use in other controllers (if needed)
+exports._sendStatusChangeNotification = sendStatusChangeNotification;
