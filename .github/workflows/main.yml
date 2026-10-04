@@ -18,9 +18,6 @@ permissions:
   contents: read
 
 jobs:
-  # ============================================================
-  # CI - Validate Backend
-  # ============================================================
   ci:
     name: CI - Validate Backend
     runs-on: ubuntu-latest
@@ -49,102 +46,117 @@ jobs:
       - name: CI completed
         run: echo "Backend CI validation completed successfully."
 
-
-  # ============================================================
-  # CD - Deploy Backend to DigitalOcean
-  # ============================================================
   deploy:
     name: CD - Deploy to DigitalOcean
     runs-on: ubuntu-latest
     needs: ci
 
     steps:
+      - name: Install SSH client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-client
+
+      - name: Configure SSH key
+        env:
+          DO_SSH_KEY_B64: ${{ secrets.DO_SSH_KEY_B64 }}
+        run: |
+          set -e
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          echo "$DO_SSH_KEY_B64" | base64 --decode > ~/.ssh/smilejobs_deploy_key
+
+          chmod 600 ~/.ssh/smilejobs_deploy_key
+
+          ssh-keygen -y -f ~/.ssh/smilejobs_deploy_key > /tmp/deploy_public_key
+
+          echo "SSH private key successfully decoded and validated."
+
+      - name: Add DigitalOcean host to known_hosts
+        env:
+          DO_HOST: ${{ secrets.DO_HOST }}
+        run: |
+          set -e
+
+          ssh-keyscan -H "$DO_HOST" >> ~/.ssh/known_hosts
+
+          chmod 600 ~/.ssh/known_hosts
+
       - name: Deploy to DigitalOcean
-        uses: appleboy/ssh-action@v1.2.5
-        with:
-          host: ${{ secrets.DO_HOST }}
-          username: ${{ secrets.DO_USER }}
-          key: ${{ secrets.DO_SSH_KEY }}
+        env:
+          DO_HOST: ${{ secrets.DO_HOST }}
+          DO_USER: ${{ secrets.DO_USER }}
+        run: |
+          set -e
 
-          script: |
-            set -e
+          echo "=========================================="
+          echo "Starting SmileJobs backend deployment"
+          echo "=========================================="
 
-            echo "=========================================="
-            echo "Starting SmileJobs backend deployment"
-            echo "=========================================="
+          ssh \
+            -i ~/.ssh/smilejobs_deploy_key \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=15 \
+            "$DO_USER@$DO_HOST" << 'REMOTE_SCRIPT'
 
-            # --------------------------------------------------
-            # Go to application repository
-            # --------------------------------------------------
-            cd /var/www/smilejobs-backend
+          set -e
 
-            echo "Current directory:"
-            pwd
+          echo "Connected to DigitalOcean successfully."
 
-            echo "Fetching latest code..."
-            git fetch origin main
+          echo "=========================================="
+          echo "Updating SmileJobs backend"
+          echo "=========================================="
 
-            echo "Updating production code..."
-            git reset --hard origin/main
+          cd /var/www/smilejobs-backend
 
-            # --------------------------------------------------
-            # Enter backend
-            # --------------------------------------------------
-            cd backend
+          echo "Fetching latest code..."
+          git fetch origin main
 
-            echo "Backend directory:"
-            pwd
+          echo "Updating production code..."
+          git reset --hard origin/main
 
-            # --------------------------------------------------
-            # Install production dependencies
-            # --------------------------------------------------
-            echo "Installing backend dependencies..."
-            npm ci --legacy-peer-deps
+          echo "Entering backend directory..."
+          cd backend
 
-            # --------------------------------------------------
-            # Validate backend syntax
-            # --------------------------------------------------
-            echo "Validating server.js..."
-            node --check server.js
+          echo "Installing backend dependencies..."
+          npm ci --legacy-peer-deps
 
-            # --------------------------------------------------
-            # Restart PM2 application
-            # --------------------------------------------------
-            echo "Restarting SmileJobs backend..."
+          echo "Validating server.js..."
+          node --check server.js
 
-            if pm2 describe smilejobs-backend > /dev/null 2>&1; then
-              pm2 restart smilejobs-backend --update-env
-            else
-              echo "PM2 application does not exist. Starting it..."
-              pm2 start server.js --name smilejobs-backend
-            fi
+          echo "Restarting SmileJobs backend..."
 
-            # --------------------------------------------------
-            # Give application time to start
-            # --------------------------------------------------
-            echo "Waiting for backend..."
-            sleep 5
+          if pm2 describe smilejobs-backend > /dev/null 2>&1; then
+            pm2 restart smilejobs-backend --update-env
+          else
+            echo "PM2 application not found. Starting application..."
+            pm2 start server.js --name smilejobs-backend
+          fi
 
-            # --------------------------------------------------
-            # PM2 status
-            # --------------------------------------------------
-            echo "PM2 application status:"
-            pm2 status
+          echo "Waiting for backend..."
+          sleep 5
 
-            # --------------------------------------------------
-            # Health check
-            # --------------------------------------------------
-            echo "Checking backend health..."
+          echo "PM2 status:"
+          pm2 status
 
-            curl --fail --silent --show-error \
-              http://127.0.0.1:5001/api/health
+          echo "Checking backend health..."
 
-            echo ""
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            http://127.0.0.1:5001/api/health
 
-            echo "=========================================="
-            echo "SmileJobs backend deployment successful"
-            echo "=========================================="
-            
+          echo ""
+
+          echo "=========================================="
+          echo "SmileJobs backend deployment successful"
+          echo "=========================================="
+
+          REMOTE_SCRIPT
 
       - name: Deployment completed
         run: echo "Production deployment completed successfully."
