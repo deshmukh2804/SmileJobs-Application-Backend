@@ -1,0 +1,100 @@
+name: SmileJobs Backend CI/CD
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/**'
+      - '.github/workflows/main.yml'
+
+  workflow_dispatch:
+
+concurrency:
+  group: smilejobs-backend-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: CI - Validate Backend
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Validate server.js
+        run: node --check server.js
+
+      - name: CI completed
+        run: echo "Backend CI validation completed successfully."
+
+  deploy:
+    name: CD - Deploy to DigitalOcean
+    runs-on: ubuntu-latest
+    needs: ci
+
+    steps:
+      - name: Deploy to DigitalOcean
+        uses: appleboy/ssh-action@v1.2.5
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          script_stop: true
+
+          script: |
+            set -e
+
+            echo "=========================================="
+            echo "Starting SmileJobs backend deployment"
+            echo "=========================================="
+
+            cd /var/www/smilejobs-backend
+
+            echo "Fetching latest code..."
+            git fetch origin main
+
+            echo "Updating production code..."
+            git reset --hard origin/main
+
+            echo "Entering backend directory..."
+            cd backend
+
+            echo "Installing backend dependencies..."
+            npm ci --legacy-peer-deps
+
+            echo "Restarting SmileJobs backend..."
+            pm2 restart smilejobs-backend --update-env
+
+            echo "Waiting for backend..."
+            sleep 5
+
+            echo "Checking backend health..."
+            curl --fail --silent --show-error \
+              http://127.0.0.1:5001/api/health
+
+            echo ""
+            echo "=========================================="
+            echo "SmileJobs backend deployment successful"
+            echo "=========================================="
+
+      - name: Deployment completed
+        run: echo "Production deployment completed successfully."
