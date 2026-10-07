@@ -38,17 +38,23 @@ const searchRoutes = require('./routes/searchRoutes');
 const fcmRoutes = require('./routes/fcmRoutes');
 const internalNotificationRoutes = require('./routes/internalNotificationRoutes');
 
+// 🔒 SAFETY NET: Final filter to strip unapproved jobs from any response
+const approvedJobsFilter = require('./middleware/approvedJobsFilter');
+
 // ─────────────────────────────────────────────
 // ROUTE MOUNTING (Order matters!)
 // ─────────────────────────────────────────────
 app.use('/api/auth', authRoutes);
 app.use('/api/profile', profileRoutes);           
-app.use('/api/v1/jobs', jobRoutes);               
-app.use('/api/v1/home', homeRoutes);
+
+// 🔒 Apply approved-jobs filter BEFORE job-serving routes
+app.use('/api/v1/jobs', approvedJobsFilter, jobRoutes);               
+app.use('/api/v1/home', approvedJobsFilter, homeRoutes);
+app.use('/api/v1/search', approvedJobsFilter, searchRoutes);
+
 app.use('/api/v1/banners', bannerRoutes);
 app.use('/api/v1/locations', locationRoutes);
 app.use('/api/v1/applications', applicationRoutes);
-app.use('/api/v1/search', searchRoutes);
 
 // ✅ FIXES THE 404 ERRORS: Mount fcmRoutes under /api/notifications
 app.use('/api/notifications', fcmRoutes);
