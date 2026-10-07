@@ -1,7 +1,7 @@
 const { getMessaging } = require('firebase-admin/messaging');
 const { initFirebaseAdmin } = require('../config/firebaseAdmin');
 const User = require('../models/User');
-const Job = require('../models/Job'); // ✅ NEW: Imported to fetch job details
+const Job = require('../models/Job'); // ✅ Imported to fetch job details
 const { mapType } = require('./notificationTypeMap');
 
 // ═══════════════════════════════════════════════════════════════
@@ -72,6 +72,18 @@ function extractCity(location, fallbackCity) {
     if (parts.length) return parts[0];
   }
   return safeString(fallbackCity);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 🔒 NEW HELPER: Verify job approval
+// ═══════════════════════════════════════════════════════════════
+function isJobApproved(job) {
+  if (!job) return false;
+  return (
+    job.approvalStatus === 'approved' &&
+    job.status === 'Live' &&
+    job.isActive === true
+  );
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -245,22 +257,32 @@ async function resolveTargetUsers(notificationDoc) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 🚀 NEW: DB ENRICHER (Fixes missing Job Info in New Alerts)
+// 🚀 DB ENRICHER (Fixes missing Job Info in New Alerts)
+// 🔒 UPDATED: Also returns job approval status to block unapproved jobs
 // ═══════════════════════════════════════════════════════════════
 async function enrichNotificationWithJobData(notificationDoc) {
   if (!notificationDoc.data) notificationDoc.data = {};
   
-  // If the admin panel only sent a jobId but didn't send salary/location, we fetch it automatically!
-  if (notificationDoc.data.jobId && (!notificationDoc.data.salary || !notificationDoc.data.location)) {
+  // If notification has jobId, we fetch job info AND check approval status
+  if (notificationDoc.data.jobId) {
     try {
       const jobInfo = await Job.findById(notificationDoc.data.jobId).lean();
+      
+      // 🔒 NEW: Attach approval info so pushForNotification can check
       if (jobInfo) {
-        notificationDoc.data.jobRole = jobInfo.title;
-        notificationDoc.data.salary = jobInfo.salary;
-        notificationDoc.data.location = jobInfo.location;
-        notificationDoc.data.company = jobInfo.companyName;
-        notificationDoc.data.city = jobInfo.location?.city;
-        notificationDoc.data.hrName = jobInfo.contactPerson?.name || 'HR';
+        notificationDoc._linkedJob = jobInfo;
+        
+        // Enrich only if missing
+        if (!notificationDoc.data.salary || !notificationDoc.data.location) {
+          notificationDoc.data.jobRole = jobInfo.title;
+          notificationDoc.data.salary = jobInfo.salary;
+          notificationDoc.data.location = jobInfo.location;
+          notificationDoc.data.company = jobInfo.companyName;
+          notificationDoc.data.city = jobInfo.location?.city;
+          notificationDoc.data.hrName = jobInfo.contactPerson?.name || 'HR';
+        }
+      } else {
+        notificationDoc._linkedJob = null;
       }
     } catch (e) {
       console.log('[FCM-ENRICH] Error fetching job data:', e.message);
@@ -271,10 +293,24 @@ async function enrichNotificationWithJobData(notificationDoc) {
 
 // ═══════════════════════════════════════════════════════════════
 // PUSH PROCESSOR
+// 🔒 UPDATED: Blocks push if linked job is not approved
 // ═══════════════════════════════════════════════════════════════
 async function pushForNotification(notificationDoc) {
   // 1. Fetch missing database info first!
   notificationDoc = await enrichNotificationWithJobData(notificationDoc);
+
+  // 🔒 FINAL SAFETY GATE: If notification is linked to a job, verify it is approved
+  if (notificationDoc?.data?.jobId) {
+    const linkedJob = notificationDoc._linkedJob;
+    if (!linkedJob) {
+      console.log(`[FCM] 🚫 Blocked push — linked job (${notificationDoc.data.jobId}) not found in DB.`);
+      return { success: false, message: 'Linked job not found', successCount: 0, failureCount: 0 };
+    }
+    if (!isJobApproved(linkedJob)) {
+      console.log(`[FCM] 🚫 Blocked push — linked job (${notificationDoc.data.jobId}) is not approved. Status: ${linkedJob.approvalStatus}`);
+      return { success: false, message: `Job not approved (status: ${linkedJob.approvalStatus})`, successCount: 0, failureCount: 0 };
+    }
+  }
 
   const users = await resolveTargetUsers(notificationDoc);
   if (!users.length) return { success: false, message: 'No users found' };
@@ -303,6 +339,7 @@ async function pushForNotification(notificationDoc) {
 
 // ═══════════════════════════════════════════════════════════════
 // DIRECT NOTIFICATION
+// 🔒 UPDATED: Checks job approval before sending direct notification
 // ═══════════════════════════════════════════════════════════════
 async function sendDirectNotificationToUser(userId, notificationData) {
   try {
@@ -314,6 +351,15 @@ async function sendDirectNotificationToUser(userId, notificationData) {
       data: notificationData.data || {},
       imageUrl: notificationData.imageUrl || '',
     });
+
+    // 🔒 FINAL SAFETY GATE: Verify linked job is approved
+    if (virtualDoc?.data?.jobId) {
+      const linkedJob = virtualDoc._linkedJob;
+      if (!linkedJob || !isJobApproved(linkedJob)) {
+        console.log(`[FCM-DIRECT] 🚫 Blocked direct push — job not approved: ${virtualDoc.data.jobId}`);
+        return { success: false, message: 'Linked job not approved' };
+      }
+    }
 
     const tokens = user.fcmTokens.map((t) => t.token).filter(Boolean);
     const { title, body } = buildTemplate(virtualDoc, user.name || '');
@@ -328,5 +374,6 @@ async function sendDirectNotificationToUser(userId, notificationData) {
 
 module.exports = {
   sendToTokens, resolveTargetUsers, pushForNotification, sendDirectNotificationToUser,
-  buildJobNotificationTemplate, buildTemplate, safeString, formatSalary, extractLocationArea, extractCity
+  buildJobNotificationTemplate, buildTemplate, safeString, formatSalary, extractLocationArea, extractCity,
+  isJobApproved  // 🆕 Exported for other modules
 };
