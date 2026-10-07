@@ -2,8 +2,17 @@
 
 const Job = require('../models/Job');
 const { _helpers } = require('../controllers/homeController');
-const { liveJobFilter, JOB_CARD_PROJECTION, transformJobCard } = _helpers;
+const { JOB_CARD_PROJECTION, transformJobCard } = _helpers;
 const { distanceKm, getJobCoords, escapeRegex, LOCAL_COORDS } = require('../utils/geoUtils');
+
+// 🔒 Explicitly defined locally here to avoid imports-induced circular reference errors
+const liveJobFilter = () => {
+  return { 
+    status: 'Live', 
+    isActive: true,
+    approvalStatus: 'approved' 
+  };
+};
 
 // ─── DYNAMIC CITY DETECTION FROM QUERY ───
 function detectCityInQuery(query) {

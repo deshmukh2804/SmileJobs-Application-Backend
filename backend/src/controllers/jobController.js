@@ -114,7 +114,7 @@ exports.getSavedJobs = async (req, res) => {
   try {
     const user = await User.findById(req.user.id).populate({
       path: 'savedJobs',
-      // ✅ UPDATED: Only show approved jobs in saved list
+      // 🔒 Ensure saved list matching ignores unapproved jobs
       match: { status: 'Live', isActive: true, approvalStatus: 'approved' }
     }).lean();
     const savedJobsList = Array.isArray(user?.savedJobs) ? user.savedJobs : [];
@@ -128,7 +128,7 @@ exports.getSavedJobs = async (req, res) => {
 exports.listJobs = async (req, res) => {
   try {
     const { page, limit, skip } = parsePagination(req);
-    // ✅ UPDATED: Added approvalStatus
+    // 🔒 Core active-approved filtering applied here
     const filter = { status: 'Live', isActive: true, approvalStatus: 'approved' };
     if (req.query.city) filter['location.city'] = new RegExp(escapeRegex(String(req.query.city).trim()), 'i');
     if (req.query.workMode) filter.workMode = req.query.workMode;
@@ -156,7 +156,7 @@ exports.searchJobs = async (req, res) => {
   try {
     const rawQ = (req.query.q || '').toString().trim();
     const { page, limit, skip } = parsePagination(req);
-    // ✅ UPDATED: Added approvalStatus
+    // 🔒 Core active-approved filtering applied here
     let filter = { status: 'Live', isActive: true, approvalStatus: 'approved' };
     if (rawQ) {
       const rx = new RegExp(escapeRegex(rawQ), 'i');
@@ -182,11 +182,11 @@ exports.getJobById = async (req, res) => {
     const { id } = req.params;
     if (!/^[0-9a-fA-F]{24}$/.test(id)) return res.status(400).json({ success: false, message: 'Invalid job ID' });
     const [job, savedIds] = await Promise.all([
-      // ✅ UPDATED: Only find job if approved + active + live
+      // 🔒 Switched to findOne with direct status criteria to prevent direct details exploits of unapproved listings
       Job.findOne({ _id: id, status: 'Live', isActive: true, approvalStatus: 'approved' }).lean(),
       getSavedJobIds(req)
     ]);
-    if (!job) return res.status(404).json({ success: false, message: 'Job not found or not yet approved' });
+    if (!job) return res.status(404).json({ success: false, message: 'Job not found or is currently undergoing approval verification.' });
     res.status(200).json({ success: true, job: transformJobDetail(job, savedIds) });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -200,7 +200,7 @@ exports.getNearbyJobs = async (req, res) => {
     const radiusKm = parseFloat(req.query.radius) || NEARBY_RADIUS_KM;
     const q = String(req.query.q || '').trim();
 
-    // ✅ UPDATED: Added approvalStatus
+    // 🔒 Core active-approved filtering applied here
     let filter = { status: 'Live', isActive: true, approvalStatus: 'approved' };
     if (q) {
       const rx = new RegExp(escapeRegex(q), 'i');
@@ -280,7 +280,7 @@ exports.getOtherCityJobs = async (req, res) => {
     const radiusKm = parseFloat(req.query.radius) || NEARBY_RADIUS_KM;
     const q = String(req.query.q || '').trim();
 
-    // ✅ UPDATED: Added approvalStatus
+    // 🔒 Core active-approved filtering applied here
     let filter = { status: 'Live', isActive: true, approvalStatus: 'approved' };
     if (q) {
       const rx = new RegExp(escapeRegex(q), 'i');

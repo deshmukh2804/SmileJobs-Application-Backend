@@ -29,12 +29,12 @@ const activeBannerFilter = (placement = 'home_hero') => {
   };
 };
 
-// ✅ UPDATED: Added approvalStatus check — only approved jobs visible to users
+// 🔒 CORE FILTER: Strictly enforces live, active, and approved status
 const liveJobFilter = () => {
   return { 
     status: 'Live', 
     isActive: true,
-    approvalStatus: 'approved'   // 🔒 Only show admin-approved jobs
+    approvalStatus: 'approved' 
   };
 };
 
@@ -280,7 +280,7 @@ exports.getHomeConfig = async (req, res) => {
       Job.countDocuments(liveJobFilter()).catch(() => 0),
       Banner.countDocuments(activeBannerFilter('home_hero')).catch(() => 0),
       Job.aggregate([
-        // ✅ UPDATED: added approvalStatus filter in categories aggregation
+        // 🔒 Enforced strict approval status filtering during aggregation
         { $match: { status: 'Live', isActive: true, approvalStatus: 'approved' } },
         { $group: { _id: { $trim: { input: { $toLower: '$category' } } }, original: { $first: '$category' } } },
         { $match: { _id: { $ne: null, $ne: '' } } },
@@ -318,9 +318,9 @@ exports.getHomeConfig = async (req, res) => {
             return { type: 'jobs', sectionKey: section.sectionKey, title: section.title || 'Jobs', enabled: true, order: section.order, items: jobs.map(j => transformJobCard(j, savedIds)) };
           }
           if (section.type === 'featuredJob') {
-            // ✅ UPDATED: use liveJobFilter spread for consistency (includes approvalStatus)
-            let job = await Job.findOne({ ...liveJobFilter(), featured: true }, JOB_CARD_PROJECTION).sort({ priority: -1, postedAt: -1 }).lean();
-            if (!job) job = await Job.findOne(liveJobFilter(), JOB_CARD_PROJECTION).sort({ postedAt: -1 }).lean();
+            // 🔒 Enforced strict approval status filtering for featured jobs
+            let job = await Job.findOne({ status: 'Live', isActive: true, approvalStatus: 'approved', featured: true }, JOB_CARD_PROJECTION).sort({ priority: -1, postedAt: -1 }).lean();
+            if (!job) job = await Job.findOne({ status: 'Live', isActive: true, approvalStatus: 'approved' }, JOB_CARD_PROJECTION).sort({ postedAt: -1 }).lean();
             return { type: 'featuredJob', sectionKey: section.sectionKey || 'featuredJob', enabled: true, order: section.order, items: job ? [transformJobCard(job, savedIds)] : [] };
           }
           return { type: section.type, sectionKey: section.sectionKey || section.type, enabled: true, order: section.order, config: section.config || {} };

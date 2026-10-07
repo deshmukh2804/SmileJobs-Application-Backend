@@ -1,6 +1,15 @@
 const Job = require('../models/Job');
 const { _helpers } = require('../controllers/homeController');
-const { liveJobFilter, JOB_CARD_PROJECTION } = _helpers;
+const { JOB_CARD_PROJECTION } = _helpers;
+
+// 🔒 Explicitly defined locally here to avoid imports-induced circular reference errors
+const liveJobFilter = () => {
+  return { 
+    status: 'Live', 
+    isActive: true,
+    approvalStatus: 'approved' 
+  };
+};
 
 async function getNearbyJobs({ lat, lon, radiusKm = 50, page = 1, limit = 20, q = '' }) {
   const skip = (page - 1) * limit;
