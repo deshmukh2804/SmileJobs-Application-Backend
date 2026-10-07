@@ -4,11 +4,11 @@ const { pushForNotification } = require('./notificationService');
 
 let notifChangeStream = null;
 let jobChangeStream = null;
-let jobUpdateChangeStream = null; // 🆕 NEW: watch for job approval updates
+let jobUpdateChangeStream = null; 
 let isPolling = false;
 
 /**
- * 🔒 HELPER: Check if a job is approved before sending notifications
+ * 🔒 HELPER: Check if a job is approved, active, and live
  */
 function isJobApproved(job) {
   if (!job) return false;
@@ -22,9 +22,7 @@ function isJobApproved(job) {
 /**
  * Handles newly inserted job in database.
  * Auto-creates a Notification doc in MongoDB.
- * 🔒 NEW: Only creates notification if job is APPROVED.
- * NOTE: We DO NOT call processNotification() manually here, 
- * because MongoDB insertion will automatically trigger the ChangeStream / Poller.
+ * 🔒 Only creates notification if job is APPROVED.
  */
 async function handleNewJob(job) {
   try {
@@ -41,7 +39,7 @@ async function handleNewJob(job) {
     if (existing) return;
 
     const company = job.company || job.companyName || 'Top Company';
-    const city = job.city || job.location || job.subLocation || 'your area';
+    const city = job.city || job.location?.city || job.location || 'your area';
     const salary = job.salary ? ` (${job.salary})` : '';
 
     console.log(`[JobWatcher] 💼 New APPROVED Job detected: "${job.title}" at ${company}`);
@@ -78,7 +76,7 @@ async function handleNewJob(job) {
 }
 
 /**
- * 🆕 NEW: Handles when a job gets APPROVED later (admin approves pending job).
+ * Handles when a job gets APPROVED later (admin approves pending job).
  * Triggers notification creation at the moment of approval.
  */
 async function handleJobApproval(job) {
@@ -94,14 +92,25 @@ async function handleJobApproval(job) {
     }
 
     const company = job.company || job.companyName || 'Top Company';
-    const city = job.city || job.location?.city || job.subLocation || 'your area';
-    const salary = job.salary ? ` (${typeof job.salary === 'object' ? '' : job.salary})` : '';
+    const city = job.location?.city || job.city || 'your area';
+    
+    // Safely extract salary string
+    let salaryStr = '';
+    if (job.salary) {
+      if (typeof job.salary === 'object') {
+        const min = job.salary.min || '';
+        const max = job.salary.max || '';
+        salaryStr = min && max ? ` (${min}-${max})` : '';
+      } else {
+        salaryStr = ` (${job.salary})`;
+      }
+    }
 
     console.log(`[JobWatcher] ✅ Job APPROVED: "${job.title}" — creating notification now.`);
 
     const notif = await Notification.create({
       title: `🔥 New Job Alert: ${job.title}`,
-      body: `${company} is hiring in ${city}${salary}. Tap to view & apply now!`,
+      body: `${company} is hiring in ${city}${salaryStr}. Tap to view & apply now!`,
       targetAudience: 'candidates',
       targetRole: 'job_seeker',
       type: 'job_alert',
@@ -116,7 +125,7 @@ async function handleJobApproval(job) {
         company: String(company),
         title: String(job.title),
         city: String(city),
-        salary: String(job.salary || ''),
+        salary: String(job.salary?.min || job.salary || ''),
       },
       status: 'sent',
       pushProcessed: false,
@@ -132,7 +141,6 @@ async function handleJobApproval(job) {
 /**
  * Dispatches push notification to devices.
  * Uses ATOMIC LOCKING to prevent duplicate sends!
- * 🔒 NEW: Verifies linked job is still approved before sending.
  */
 async function processNotification(notifOrId) {
   try {
@@ -140,7 +148,6 @@ async function processNotification(notifOrId) {
     if (!notificationId) return;
 
     // 🔒 ATOMIC LOCK: Claim this notification immediately in MongoDB.
-    // If another thread/poller already set pushProcessed = true, targetDoc will be NULL.
     const targetDoc = await Notification.findOneAndUpdate(
       { 
         _id: notificationId, 
@@ -155,12 +162,11 @@ async function processNotification(notifOrId) {
       }
     );
 
-    // If targetDoc is null, it means it was ALREADY processed by ChangeStream/Poller! Abort.
     if (!targetDoc) {
       return; 
     }
 
-    // 🔒 FINAL CHECK: If this notification is linked to a job, verify the job is still approved
+    // 🔒 FINAL CHECK: Verify the linked job is still approved
     const linkedJobId = targetDoc?.data?.jobId;
     if (linkedJobId) {
       try {
@@ -169,7 +175,14 @@ async function processNotification(notifOrId) {
           console.log(`[Watcher] 🚫 Blocked push for unapproved/missing job (${linkedJobId}). Notification: ${targetDoc.title}`);
           await Notification.updateOne(
             { _id: targetDoc._id },
-            { $set: { status: 'blocked', 'stats.pushSent': 0, 'stats.pushFailed': 0 }, $push: { errorLog: '[BLOCKED] Linked job not approved.' } }
+            { 
+              $set: { 
+                status: 'blocked', 
+                'stats.pushSent': 0, 
+                'stats.pushFailed': 0 
+              }, 
+              $push: { errorLog: '[BLOCKED] Linked job not approved.' } 
+            }
           );
           return;
         }
@@ -205,7 +218,8 @@ async function processNotification(notifOrId) {
 }
 
 /**
- * Fallback polling every 5s to process any pending notifications.
+ * Fallback polling every 5s to process pending notifications
+ * and search for newly approved jobs that missed notifications.
  */
 function startPolling() {
   if (isPolling) return;
@@ -214,7 +228,7 @@ function startPolling() {
   const INTERVAL = 5000;
   const poll = async () => {
     try {
-      // Find notifications that haven't been processed yet
+      // 1. Process pending unsent notifications
       const pending = await Notification.find({
         pushProcessed: { $ne: true },
         status: { $in: ['sent', 'pending'] },
@@ -228,20 +242,21 @@ function startPolling() {
         await processNotification(item._id);
       }
 
-      // 🆕 NEW: Polling fallback to detect newly approved jobs that may need notifications
+      // 2. 🔒 CLOCK-FREE POLLING BACKUP: Fetch recently updated approved jobs.
+      // Simply scans recent approved jobs and creates a notification if one does not exist.
       const recentlyApprovedJobs = await Job.find({
         approvalStatus: 'approved',
         status: 'Live',
-        isActive: true,
-        approvedAt: { $gte: new Date(Date.now() - 60000) } // approved within last 60s
+        isActive: true
       })
-        .select('_id title companyName location salary company subLocation city')
+        .sort({ updatedAt: -1 }) // Scan the latest modified jobs
         .limit(20)
         .lean();
 
       for (const job of recentlyApprovedJobs) {
-        const already = await Notification.findOne({ 'data.jobId': String(job._id) }).select('_id').lean();
-        if (!already) {
+        const alreadyExists = await Notification.findOne({ 'data.jobId': String(job._id) }).select('_id').lean();
+        if (!alreadyExists) {
+          console.log(`[Watcher-Polling] 🔌 Found approved job "${job.title}" missing notification. Generating...`);
           await handleJobApproval(job);
         }
       }
@@ -291,7 +306,7 @@ function startChangeStream() {
       console.warn('[Watcher] Job change stream warning:', err.message);
     });
 
-    // 🆕 NEW: Watch for job UPDATES (approvalStatus changes from pending -> approved)
+    // Watch for job UPDATES (approvalStatus changes from pending -> approved)
     jobUpdateChangeStream = Job.watch(
       [{ $match: { operationType: 'update' } }],
       { fullDocument: 'updateLookup' }
@@ -299,10 +314,9 @@ function startChangeStream() {
 
     jobUpdateChangeStream.on('change', async (change) => {
       const doc = change.fullDocument;
-      const updatedFields = change.updateDescription?.updatedFields || {};
-      // Only trigger if approvalStatus field was changed to 'approved'
-      if (doc && updatedFields.approvalStatus === 'approved') {
-        console.log(`[JobWatcher] 🔄 Job approval update detected: ${doc._id}`);
+      // 🔒 STRIP NESTED PATH CHECKS: Read state directly from the full lookup document
+      if (doc && doc.approvalStatus === 'approved') {
+        console.log(`[JobWatcher] 🔄 Job approval update detected via change stream: ${doc._id}`);
         await handleJobApproval(doc);
       }
     });
@@ -312,7 +326,7 @@ function startChangeStream() {
     });
 
     console.log('✅ [Watcher] Real-Time MongoDB Change Stream active');
-    startPolling(); // Polling runs safely now thanks to atomic locking
+    startPolling(); 
     return true;
   } catch (err) {
     console.warn('[Watcher] Change stream init error, fallback to polling:', err.message);

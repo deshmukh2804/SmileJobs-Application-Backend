@@ -1,7 +1,7 @@
 const { getMessaging } = require('firebase-admin/messaging');
 const { initFirebaseAdmin } = require('../config/firebaseAdmin');
 const User = require('../models/User');
-const Job = require('../models/Job'); // ✅ Imported to fetch job details
+const Job = require('../models/Job'); 
 const { mapType } = require('./notificationTypeMap');
 
 // ═══════════════════════════════════════════════════════════════
@@ -75,7 +75,7 @@ function extractCity(location, fallbackCity) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 🔒 NEW HELPER: Verify job approval
+// 🔒 HELPER: Verify job approval
 // ═══════════════════════════════════════════════════════════════
 function isJobApproved(job) {
   if (!job) return false;
@@ -87,7 +87,7 @@ function isJobApproved(job) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// TEMPLATE BUILDER (Multi-line layout exactly like the image)
+// TEMPLATE BUILDER
 // ═══════════════════════════════════════════════════════════════
 function buildJobNotificationTemplate(doc, userName = '') {
   const d = doc.data || {};
@@ -107,7 +107,6 @@ function buildJobNotificationTemplate(doc, userName = '') {
     'application_rejected'
   ].includes(type);
 
-  // 1. SET THE TITLE
   if (isStatusUpdate) {
     const firstName = userName.split(' ')[0] || '';
     const statusMap = {
@@ -122,11 +121,9 @@ function buildJobNotificationTemplate(doc, userName = '') {
     const statusText = statusMap[type] || 'has an update on your application.';
     title = firstName ? `${firstName}, ${hrName} ${statusText}` : `${hrName} ${statusText}`;
   } else {
-    // IT'S A NEW JOB ALERT
     title = company ? `New Job Alert: ${company} 🔥` : `New Job Opening! 🔥`;
   }
 
-  // 2. SET THE MULTI-LINE BODY
   const parts = [];
   if (jobRole)  parts.push(jobRole);
   if (salary)   parts.push(`Salary : ${salary}`);
@@ -257,22 +254,18 @@ async function resolveTargetUsers(notificationDoc) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 🚀 DB ENRICHER (Fixes missing Job Info in New Alerts)
-// 🔒 UPDATED: Also returns job approval status to block unapproved jobs
+// DB ENRICHER
 // ═══════════════════════════════════════════════════════════════
 async function enrichNotificationWithJobData(notificationDoc) {
   if (!notificationDoc.data) notificationDoc.data = {};
   
-  // If notification has jobId, we fetch job info AND check approval status
   if (notificationDoc.data.jobId) {
     try {
       const jobInfo = await Job.findById(notificationDoc.data.jobId).lean();
       
-      // 🔒 NEW: Attach approval info so pushForNotification can check
       if (jobInfo) {
         notificationDoc._linkedJob = jobInfo;
         
-        // Enrich only if missing
         if (!notificationDoc.data.salary || !notificationDoc.data.location) {
           notificationDoc.data.jobRole = jobInfo.title;
           notificationDoc.data.salary = jobInfo.salary;
@@ -293,13 +286,10 @@ async function enrichNotificationWithJobData(notificationDoc) {
 
 // ═══════════════════════════════════════════════════════════════
 // PUSH PROCESSOR
-// 🔒 UPDATED: Blocks push if linked job is not approved
 // ═══════════════════════════════════════════════════════════════
 async function pushForNotification(notificationDoc) {
-  // 1. Fetch missing database info first!
   notificationDoc = await enrichNotificationWithJobData(notificationDoc);
 
-  // 🔒 FINAL SAFETY GATE: If notification is linked to a job, verify it is approved
   if (notificationDoc?.data?.jobId) {
     const linkedJob = notificationDoc._linkedJob;
     if (!linkedJob) {
@@ -339,7 +329,6 @@ async function pushForNotification(notificationDoc) {
 
 // ═══════════════════════════════════════════════════════════════
 // DIRECT NOTIFICATION
-// 🔒 UPDATED: Checks job approval before sending direct notification
 // ═══════════════════════════════════════════════════════════════
 async function sendDirectNotificationToUser(userId, notificationData) {
   try {
@@ -352,7 +341,6 @@ async function sendDirectNotificationToUser(userId, notificationData) {
       imageUrl: notificationData.imageUrl || '',
     });
 
-    // 🔒 FINAL SAFETY GATE: Verify linked job is approved
     if (virtualDoc?.data?.jobId) {
       const linkedJob = virtualDoc._linkedJob;
       if (!linkedJob || !isJobApproved(linkedJob)) {
@@ -375,5 +363,5 @@ async function sendDirectNotificationToUser(userId, notificationData) {
 module.exports = {
   sendToTokens, resolveTargetUsers, pushForNotification, sendDirectNotificationToUser,
   buildJobNotificationTemplate, buildTemplate, safeString, formatSalary, extractLocationArea, extractCity,
-  isJobApproved  // 🆕 Exported for other modules
+  isJobApproved  
 };
