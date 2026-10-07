@@ -79,11 +79,11 @@ function extractCity(location, fallbackCity) {
 // ═══════════════════════════════════════════════════════════════
 function isJobApproved(job) {
   if (!job) return false;
-  return (
-    job.approvalStatus === 'approved' &&
-    job.status === 'Live' &&
-    job.isActive === true
-  );
+  const approval = String(job.approvalStatus || '').toLowerCase().trim();
+  const status = String(job.status || '').toLowerCase().trim();
+  const active = job.isActive === true || String(job.isActive) === 'true';
+  
+  return approval === 'approved' && status === 'live' && active;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -303,12 +303,18 @@ async function pushForNotification(notificationDoc) {
   }
 
   const users = await resolveTargetUsers(notificationDoc);
-  if (!users.length) return { success: false, message: 'No users found' };
+  
+  // 🔒 VERIFICATION LOGGING: Print detailed error if no candidate users have FCM tokens
+  if (!users.length) {
+    console.warn('\x1b[33m%s\x1b[0m', `⚠️  [FCM] Notification ${notificationDoc._id} aborted: No candidates with registered FCM tokens were found in the database.`);
+    return { success: false, message: 'No registered user devices found', successCount: 0, failureCount: 0 };
+  }
 
   const mobileType = mapType(notificationDoc.type);
   const isBulkSend = users.length > 2000;
 
   if (!isBulkSend) {
+    let pushedCount = 0;
     for (const u of users) {
       const tokens = [...new Set((u.fcmTokens || []).map((t) => t.token).filter(Boolean))];
       if (!tokens.length) continue;
@@ -317,8 +323,9 @@ async function pushForNotification(notificationDoc) {
       const dataPayload = { type: mobileType, notificationId: String(notificationDoc._id || ''), title, body, ...notificationDoc.data };
 
       await sendToTokens(tokens, { title, body, imageUrl: notificationDoc.imageUrl || '' }, dataPayload);
+      pushedCount++;
     }
-    return { success: true };
+    return { success: true, successCount: pushedCount, failureCount: 0 };
   } else {
     const { title, body } = buildTemplate(notificationDoc, '');
     const allTokens = [...new Set(users.flatMap((u) => (u.fcmTokens || []).map((t) => t.token).filter(Boolean)))];

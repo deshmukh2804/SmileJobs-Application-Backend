@@ -9,20 +9,20 @@ let isPolling = false;
 
 /**
  * 🔒 HELPER: Check if a job is approved, active, and live
+ * Case-insensitive safety check to handle any database variations
  */
 function isJobApproved(job) {
   if (!job) return false;
-  return (
-    job.approvalStatus === 'approved' &&
-    job.status === 'Live' &&
-    job.isActive === true
-  );
+  const approval = String(job.approvalStatus || '').toLowerCase().trim();
+  const status = String(job.status || '').toLowerCase().trim();
+  const active = job.isActive === true || String(job.isActive) === 'true';
+  
+  return approval === 'approved' && status === 'live' && active;
 }
 
 /**
  * Handles newly inserted job in database.
- * Auto-creates a Notification doc in MongoDB.
- * 🔒 Only creates notification if job is APPROVED.
+ * Auto-creates a Notification doc in MongoDB and sends immediately if approved.
  */
 async function handleNewJob(job) {
   try {
@@ -65,11 +65,14 @@ async function handleNewJob(job) {
         salary: String(job.salary || ''),
       },
       status: 'sent',
-      pushProcessed: false, // Will be claimed atomically by processNotification
+      pushProcessed: false, 
       sentAt: new Date(),
     });
 
     console.log(`[JobWatcher] 📢 Notification document created in DB: ${notif._id}`);
+    
+    // 🚀 IMMEDIATE DISPATCH: Send notification immediately
+    await processNotification(notif._id);
   } catch (err) {
     console.error('[JobWatcher] Error handling new job:', err.message);
   }
@@ -77,7 +80,7 @@ async function handleNewJob(job) {
 
 /**
  * Handles when a job gets APPROVED later (admin approves pending job).
- * Triggers notification creation at the moment of approval.
+ * Triggers notification creation and dispatches immediately at the moment of approval.
  */
 async function handleJobApproval(job) {
   try {
@@ -132,7 +135,10 @@ async function handleJobApproval(job) {
       sentAt: new Date(),
     });
 
-    console.log(`[JobWatcher] 📢 Approval-triggered notification created: ${notif._id}`);
+    console.log(`[JobWatcher] 📢 Approval-triggered notification created in DB: ${notif._id}`);
+    
+    // 🚀 IMMEDIATE DISPATCH: Send notification immediately without waiting for Poller cycles
+    await processNotification(notif._id);
   } catch (err) {
     console.error('[JobWatcher] Error handling job approval:', err.message);
   }
@@ -163,7 +169,7 @@ async function processNotification(notifOrId) {
     );
 
     if (!targetDoc) {
-      return; 
+      return; // Already processed, return immediately to avoid duplicates
     }
 
     // 🔒 FINAL CHECK: Verify the linked job is still approved
@@ -243,13 +249,13 @@ function startPolling() {
       }
 
       // 2. 🔒 CLOCK-FREE POLLING BACKUP: Fetch recently updated approved jobs.
-      // Simply scans recent approved jobs and creates a notification if one does not exist.
+      // Scan recent approved jobs and create notifications if they are missing
       const recentlyApprovedJobs = await Job.find({
         approvalStatus: 'approved',
         status: 'Live',
         isActive: true
       })
-        .sort({ updatedAt: -1 }) // Scan the latest modified jobs
+        .sort({ updatedAt: -1 }) 
         .limit(20)
         .lean();
 
@@ -314,8 +320,8 @@ function startChangeStream() {
 
     jobUpdateChangeStream.on('change', async (change) => {
       const doc = change.fullDocument;
-      // 🔒 STRIP NESTED PATH CHECKS: Read state directly from the full lookup document
-      if (doc && doc.approvalStatus === 'approved') {
+      // Read approval status directly from the full document update
+      if (doc && isJobApproved(doc)) {
         console.log(`[JobWatcher] 🔄 Job approval update detected via change stream: ${doc._id}`);
         await handleJobApproval(doc);
       }
