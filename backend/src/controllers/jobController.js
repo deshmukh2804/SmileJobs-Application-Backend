@@ -114,7 +114,8 @@ exports.getSavedJobs = async (req, res) => {
   try {
     const user = await User.findById(req.user.id).populate({
       path: 'savedJobs',
-      match: { status: 'Live', isActive: true }
+      // ✅ UPDATED: Only show approved jobs in saved list
+      match: { status: 'Live', isActive: true, approvalStatus: 'approved' }
     }).lean();
     const savedJobsList = Array.isArray(user?.savedJobs) ? user.savedJobs : [];
     const savedIds = savedJobsList.map(j => String(j._id));
@@ -127,7 +128,8 @@ exports.getSavedJobs = async (req, res) => {
 exports.listJobs = async (req, res) => {
   try {
     const { page, limit, skip } = parsePagination(req);
-    const filter = { status: 'Live', isActive: true };
+    // ✅ UPDATED: Added approvalStatus
+    const filter = { status: 'Live', isActive: true, approvalStatus: 'approved' };
     if (req.query.city) filter['location.city'] = new RegExp(escapeRegex(String(req.query.city).trim()), 'i');
     if (req.query.workMode) filter.workMode = req.query.workMode;
     if (req.query.jobType) filter.jobType = req.query.jobType;
@@ -154,7 +156,8 @@ exports.searchJobs = async (req, res) => {
   try {
     const rawQ = (req.query.q || '').toString().trim();
     const { page, limit, skip } = parsePagination(req);
-    let filter = { status: 'Live', isActive: true };
+    // ✅ UPDATED: Added approvalStatus
+    let filter = { status: 'Live', isActive: true, approvalStatus: 'approved' };
     if (rawQ) {
       const rx = new RegExp(escapeRegex(rawQ), 'i');
       filter.$or = [{ title: rx }, { role: rx }, { companyName: rx }, { 'location.city': rx }, { skills: rx }];
@@ -179,10 +182,11 @@ exports.getJobById = async (req, res) => {
     const { id } = req.params;
     if (!/^[0-9a-fA-F]{24}$/.test(id)) return res.status(400).json({ success: false, message: 'Invalid job ID' });
     const [job, savedIds] = await Promise.all([
-      Job.findById(id).lean(),
+      // ✅ UPDATED: Only find job if approved + active + live
+      Job.findOne({ _id: id, status: 'Live', isActive: true, approvalStatus: 'approved' }).lean(),
       getSavedJobIds(req)
     ]);
-    if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
+    if (!job) return res.status(404).json({ success: false, message: 'Job not found or not yet approved' });
     res.status(200).json({ success: true, job: transformJobDetail(job, savedIds) });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -196,7 +200,8 @@ exports.getNearbyJobs = async (req, res) => {
     const radiusKm = parseFloat(req.query.radius) || NEARBY_RADIUS_KM;
     const q = String(req.query.q || '').trim();
 
-    let filter = { status: 'Live', isActive: true };
+    // ✅ UPDATED: Added approvalStatus
+    let filter = { status: 'Live', isActive: true, approvalStatus: 'approved' };
     if (q) {
       const rx = new RegExp(escapeRegex(q), 'i');
       filter.$or = [{ title: rx }, { role: rx }, { companyName: rx }, { skills: rx }];
@@ -275,7 +280,8 @@ exports.getOtherCityJobs = async (req, res) => {
     const radiusKm = parseFloat(req.query.radius) || NEARBY_RADIUS_KM;
     const q = String(req.query.q || '').trim();
 
-    let filter = { status: 'Live', isActive: true };
+    // ✅ UPDATED: Added approvalStatus
+    let filter = { status: 'Live', isActive: true, approvalStatus: 'approved' };
     if (q) {
       const rx = new RegExp(escapeRegex(q), 'i');
       filter.$or = [{ title: rx }, { role: rx }, { companyName: rx }, { skills: rx }];

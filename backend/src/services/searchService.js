@@ -6,15 +6,12 @@ const { liveJobFilter, JOB_CARD_PROJECTION, transformJobCard } = _helpers;
 const { distanceKm, getJobCoords, escapeRegex, LOCAL_COORDS } = require('../utils/geoUtils');
 
 // ─── DYNAMIC CITY DETECTION FROM QUERY ───
-// Detects if the user's search query contains any known city/area name.
-// If yes → we skip GPS radius filtering so jobs from that city are returned.
 function detectCityInQuery(query) {
   if (!query) return null;
   const lowerQuery = query.toLowerCase();
   const knownLocations = Object.keys(LOCAL_COORDS);
   
   for (const loc of knownLocations) {
-    // Match full word boundaries to avoid false positives
     const regex = new RegExp(`\\b${loc}\\b`, 'i');
     if (regex.test(lowerQuery)) {
       return loc;
@@ -29,13 +26,9 @@ async function searchJobs({ q, city, area, category, coords, radiusKm, page, lim
   const filter = { ...liveJobFilter() };
   const andConditions = [];
 
-  // ─── DETECT IF USER TYPED A CITY NAME IN THE QUERY ───
   const detectedCity = detectCityInQuery(q);
   const hasExplicitLocation = Boolean(city || area || detectedCity);
 
-  // ─── INTELLIGENT WORD-TOKENIZED TEXT SEARCH ───
-  // Splits "Nashik", "Baner Pune", "Software Developer Kharadi" etc.
-  // Every word must match somewhere in title/role/skills/city/area/etc.
   if (q && q.trim()) {
     const words = q.trim().split(/\s+/).filter(w => w.length > 0);
     
@@ -59,14 +52,12 @@ async function searchJobs({ q, city, area, category, coords, radiusKm, page, lim
     });
   }
 
-  // ─── EXPLICIT CITY FILTER ───
   if (city && city.trim()) {
     andConditions.push({
       'location.city': new RegExp(escapeRegex(city.trim()), 'i')
     });
   }
 
-  // ─── EXPLICIT AREA FILTER ───
   if (area && area.trim()) {
     const areaRx = new RegExp(escapeRegex(area.trim()), 'i');
     andConditions.push({
@@ -78,7 +69,6 @@ async function searchJobs({ q, city, area, category, coords, radiusKm, page, lim
     });
   }
 
-  // ─── EXPLICIT CATEGORY FILTER ───
   if (category && category.trim()) {
     andConditions.push({
       category: new RegExp(`^${escapeRegex(category.trim())}$`, 'i')
@@ -89,10 +79,6 @@ async function searchJobs({ q, city, area, category, coords, radiusKm, page, lim
     filter.$and = andConditions;
   }
 
-  // ─── SMART LOCATION LOGIC ───
-  // If user has typed a city name OR explicitly selected a city/area,
-  // we do NOT apply the GPS radius filter — the text/city match handles filtering.
-  // Only apply GPS radius when no location was specified anywhere.
   const shouldApplyGpsRadius = coords && coords.lat != null && coords.lon != null && !hasExplicitLocation;
 
   if (shouldApplyGpsRadius) {
@@ -144,9 +130,6 @@ async function searchJobs({ q, city, area, category, coords, radiusKm, page, lim
     };
   }
 
-  // ─── STANDARD PAGINATED MONGO QUERY (no GPS radius) ───
-  // Runs when the user has typed a city/area OR when no coords were provided.
-  // This ensures Nashik, Delhi, Mumbai, Kolkata, and ALL cities can be found.
   const [jobs, total] = await Promise.all([
     Job.find(filter, JOB_CARD_PROJECTION)
       .sort({ postedAt: -1, createdAt: -1 })
@@ -156,7 +139,6 @@ async function searchJobs({ q, city, area, category, coords, radiusKm, page, lim
     Job.countDocuments(filter),
   ]);
 
-  // Optionally add distance info for display if coords are available
   const transformed = jobs.map((j) => {
     const t = transformJobCard(j);
     if (coords && coords.lat != null && coords.lon != null) {
@@ -202,7 +184,6 @@ async function getPopularCategories({ limit = 8 }) {
   return result.filter((r) => r.category && r.count > 0);
 }
 
-// ─── ENHANCED SUGGESTIONS — INCLUDE CITIES + JOB TITLES ───
 async function getSearchSuggestions({ q, limit = 8 }) {
   if (!q || q.trim().length < 2) return [];
   const rx = new RegExp(escapeRegex(q.trim()), 'i');
@@ -235,7 +216,6 @@ async function getSearchSuggestions({ q, limit = 8 }) {
 
   const suggestions = new Set();
   
-  // Priority: city > job title > role > category > company > skills
   for (const j of results) {
     const cityName = j.location?.city;
     const subLoc = j.location?.subLocation;
@@ -296,7 +276,6 @@ async function getAreasByCity({ city }) {
   return Array.from(areas).sort();
 }
 
-// ─── NEW: GET ALL AVAILABLE CITIES (for front-end display) ───
 async function getAvailableCities() {
   const pipeline = [
     { $match: liveJobFilter() },
