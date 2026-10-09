@@ -7,17 +7,24 @@ let jobChangeStream = null;
 let jobUpdateChangeStream = null; 
 let isPolling = false;
 
+// 🧠 In-Memory Deduplication: Prevents repeating logs or duplicate notifications
+const processedJobs = new Set();
+
 /**
  * 🔒 HELPER: Check if a job is approved, active, and live
- * Case-insensitive safety check to handle any database variations
+ * Robust check handling string casing and default boolean values
  */
 function isJobApproved(job) {
   if (!job) return false;
   const approval = String(job.approvalStatus || '').toLowerCase().trim();
   const status = String(job.status || '').toLowerCase().trim();
-  const active = job.isActive === true || String(job.isActive) === 'true';
   
-  return approval === 'approved' && status === 'live' && active;
+  // Treat undefined/null as true (Mongoose default) unless explicitly false
+  const active = job.isActive === undefined || job.isActive === null || job.isActive === true || String(job.isActive).toLowerCase() === 'true';
+  const isApproved = approval === 'approved';
+  const isLive = ['live', 'active', 'approved', 'published', ''].includes(status);
+
+  return isApproved && isLive && active;
 }
 
 /**
@@ -27,20 +34,28 @@ function isJobApproved(job) {
 async function handleNewJob(job) {
   try {
     if (!job || !job._id) return;
+    const jobIdStr = String(job._id);
 
     // 🔒 BLOCK: Do not create notifications for unapproved jobs
     if (!isJobApproved(job)) {
       console.log(`[JobWatcher] ⏸️ Job "${job.title}" is NOT approved yet (status: ${job.approvalStatus}). Notification SKIPPED.`);
+      processedJobs.add(jobIdStr);
       return;
     }
 
     // Prevent duplicate notification creation for the same job ID
-    const existing = await Notification.findOne({ 'data.jobId': String(job._id) });
-    if (existing) return;
+    const existing = await Notification.findOne({
+      $or: [{ 'data.jobId': jobIdStr }, { jobId: job._id }]
+    }).select('_id').lean();
+
+    if (existing) {
+      processedJobs.add(jobIdStr);
+      return;
+    }
 
     const company = job.company || job.companyName || 'Top Company';
     const city = job.city || job.location?.city || job.location || 'your area';
-    const salary = job.salary ? ` (${job.salary})` : '';
+    const salary = job.salary ? ` (${typeof job.salary === 'object' ? `${job.salary.min || ''}-${job.salary.max || ''}` : job.salary})` : '';
 
     console.log(`[JobWatcher] 💼 New APPROVED Job detected: "${job.title}" at ${company}`);
 
@@ -58,17 +73,18 @@ async function handleNewJob(job) {
       },
       data: {
         type: 'JOB',
-        jobId: String(job._id),
+        jobId: jobIdStr,
         company: String(company),
         title: String(job.title),
         city: String(city),
-        salary: String(job.salary || ''),
+        salary: String(typeof job.salary === 'object' ? (job.salary?.min || '') : (job.salary || '')),
       },
       status: 'sent',
       pushProcessed: false, 
       sentAt: new Date(),
     });
 
+    processedJobs.add(jobIdStr);
     console.log(`[JobWatcher] 📢 Notification document created in DB: ${notif._id}`);
     
     // 🚀 IMMEDIATE DISPATCH: Send notification immediately
@@ -85,17 +101,25 @@ async function handleNewJob(job) {
 async function handleJobApproval(job) {
   try {
     if (!job || !job._id) return;
-    if (!isJobApproved(job)) return;
+    const jobIdStr = String(job._id);
+
+    if (!isJobApproved(job)) {
+      processedJobs.add(jobIdStr);
+      return;
+    }
 
     // Prevent duplicate notification creation for the same job ID
-    const existing = await Notification.findOne({ 'data.jobId': String(job._id) });
+    const existing = await Notification.findOne({
+      $or: [{ 'data.jobId': jobIdStr }, { jobId: job._id }]
+    }).select('_id').lean();
+
     if (existing) {
-      console.log(`[JobWatcher] ℹ️ Notification already exists for job ${job._id}, skipping.`);
+      processedJobs.add(jobIdStr);
       return;
     }
 
     const company = job.company || job.companyName || 'Top Company';
-    const city = job.location?.city || job.city || 'your area';
+    const city = job.location?.city || job.city || job.location || 'your area';
     
     // Safely extract salary string
     let salaryStr = '';
@@ -124,17 +148,18 @@ async function handleJobApproval(job) {
       },
       data: {
         type: 'JOB',
-        jobId: String(job._id),
+        jobId: jobIdStr,
         company: String(company),
         title: String(job.title),
         city: String(city),
-        salary: String(job.salary?.min || job.salary || ''),
+        salary: String(typeof job.salary === 'object' ? (job.salary?.min || '') : (job.salary || '')),
       },
       status: 'sent',
       pushProcessed: false,
       sentAt: new Date(),
     });
 
+    processedJobs.add(jobIdStr);
     console.log(`[JobWatcher] 📢 Approval-triggered notification created in DB: ${notif._id}`);
     
     // 🚀 IMMEDIATE DISPATCH: Send notification immediately without waiting for Poller cycles
@@ -224,14 +249,13 @@ async function processNotification(notifOrId) {
 }
 
 /**
- * Fallback polling every 5s to process pending notifications
- * and search for newly approved jobs that missed notifications.
+ * Fallback polling backup (runs every 15 seconds) to catch anything missed.
  */
 function startPolling() {
   if (isPolling) return;
   isPolling = true;
 
-  const INTERVAL = 5000;
+  const INTERVAL = 15000;
   const poll = async () => {
     try {
       // 1. Process pending unsent notifications
@@ -248,22 +272,31 @@ function startPolling() {
         await processNotification(item._id);
       }
 
-      // 2. 🔒 CLOCK-FREE POLLING BACKUP: Fetch recently updated approved jobs.
-      // Scan recent approved jobs and create notifications if they are missing
+      // 2. Fetch recently updated approved jobs
       const recentlyApprovedJobs = await Job.find({
-        approvalStatus: 'approved',
-        status: 'Live',
-        isActive: true
+        approvalStatus: { $in: ['approved', 'Approved'] }
       })
         .sort({ updatedAt: -1 }) 
         .limit(20)
         .lean();
 
       for (const job of recentlyApprovedJobs) {
-        const alreadyExists = await Notification.findOne({ 'data.jobId': String(job._id) }).select('_id').lean();
+        const jobIdStr = String(job._id);
+        if (processedJobs.has(jobIdStr)) continue;
+
+        const alreadyExists = await Notification.findOne({
+          $or: [{ 'data.jobId': jobIdStr }, { jobId: job._id }]
+        }).select('_id').lean();
+
         if (!alreadyExists) {
-          console.log(`[Watcher-Polling] 🔌 Found approved job "${job.title}" missing notification. Generating...`);
-          await handleJobApproval(job);
+          if (isJobApproved(job)) {
+            console.log(`[Watcher-Polling] 🔌 Found approved job "${job.title}" missing notification. Generating...`);
+            await handleJobApproval(job);
+          } else {
+            processedJobs.add(jobIdStr);
+          }
+        } else {
+          processedJobs.add(jobIdStr);
         }
       }
     } catch (err) {
@@ -320,8 +353,22 @@ function startChangeStream() {
 
     jobUpdateChangeStream.on('change', async (change) => {
       const doc = change.fullDocument;
-      // Read approval status directly from the full document update
-      if (doc && isJobApproved(doc)) {
+      if (!doc || !doc._id) return;
+      
+      const jobIdStr = String(doc._id);
+      
+      // Filter out non-approval updates if already processed
+      const updatedFields = change.updateDescription?.updatedFields || {};
+      const approvalFields = ['approvalStatus', 'status', 'isActive'];
+      const isApprovalChange = Object.keys(updatedFields).some(k => 
+        approvalFields.includes(k) || approvalFields.some(f => k.startsWith(f))
+      );
+
+      if (!isApprovalChange && processedJobs.has(jobIdStr)) {
+        return;
+      }
+
+      if (isJobApproved(doc)) {
         console.log(`[JobWatcher] 🔄 Job approval update detected via change stream: ${doc._id}`);
         await handleJobApproval(doc);
       }
